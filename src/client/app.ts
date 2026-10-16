@@ -1395,7 +1395,7 @@ function renderModal() {
           </div>
         ` : '<p class="m" style="margin: 6px 0 12px;">No custom attributes specified.</p>'}
 
-        ${A.me.owner ? `
+        ${A.me ? `
           <details class="accordion" style="margin-top: 14px;">
             <summary>Edit Technical Values & Attributes</summary>
             <div class="acc-body" id="machEditForm">

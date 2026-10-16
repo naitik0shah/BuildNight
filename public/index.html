@@ -753,10 +753,16 @@
       flex-direction: column;
       gap: 6px;
     }
-    .att-card img, .att-card video {
+    .att-card img {
       width: 100%;
-      height: 110px;
+      height: 120px;
       object-fit: cover;
+      border-radius: 6px;
+      background: var(--card);
+    }
+    .att-card video {
+      width: 100%;
+      max-height: 180px;
       border-radius: 6px;
       background: #000;
     }

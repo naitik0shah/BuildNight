@@ -734,11 +734,11 @@ app.delete('/api/:col/:id', auth, known, (req: any, res) => {
   const row = db[col][i];
 
   if (!req.u.owner) {
-    // Staff can delete their own entries
-    if (col === 'entries' && row.by === req.u.id) {
-      // Allowed
-    } else {
+    if (col === 'people' || col === 'costs') {
       return res.status(403).json({ error: 'Owner only' });
+    }
+    if (col === 'entries' && row.by !== req.u.id) {
+      return res.status(403).json({ error: 'Staff can only delete their own entries' });
     }
   }
 
