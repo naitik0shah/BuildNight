@@ -7,7 +7,8 @@
     "build": "esbuild src/client/app.ts --bundle --outfile=public/app.js --target=es2020",
     "start": "npm run build && tsx src/server.ts",
     "dev": "npm run build && tsx watch src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
   },
   "dependencies": { "express": "^4.19.2" },
   "devDependencies": {

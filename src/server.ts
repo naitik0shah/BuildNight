@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { TEMPLATES } from './templates';
 
 type Field = [key: string, label: string, type: 'text' | 'number' | 'bool' | 'media' | 'pw' | 'select' | 'date', opts?: string[]];
 
@@ -20,7 +21,15 @@ const REQ: Record<string, string> = { people: 'name', items: 'name', machines: '
 
 // ---- storage: a JSON file, written atomically. Swap load/save for MongoDB/Postgres when you outgrow it. ----
 const FILE = process.env.DB_FILE || 'data/db.json';
-const db: any = fs.existsSync(FILE) ? JSON.parse(fs.readFileSync(FILE, 'utf8')) : { business: null };
+let db: any = { business: null };
+try {
+  if (fs.existsSync(FILE)) {
+    db = JSON.parse(fs.readFileSync(FILE, 'utf8'));
+  }
+} catch (e) {
+  console.warn('Failed to parse database file, using fallback empty state:', e);
+  db = { business: null };
+}
 for (const k of [...Object.keys(F), 'moves']) db[k] ??= [];
 const save = () => { fs.mkdirSync(path.dirname(FILE), { recursive: true }); fs.writeFileSync(FILE + '.tmp', JSON.stringify(db)); fs.renameSync(FILE + '.tmp', FILE); };
 const uid = () => crypto.randomUUID();
@@ -60,6 +69,18 @@ function clean(col: string, b: any, partial = false) {
     }
     o[k] = v;
   }
+  // Support flexible dynamic user-defined custom fields
+  if (b?.extra && typeof b.extra === 'object' && !Array.isArray(b.extra)) {
+    const extra: Record<string, string> = {};
+    for (const [ek, ev] of Object.entries(b.extra)) {
+      const cleanKey = String(ek).trim().slice(0, 50);
+      const cleanVal = String(ev ?? '').trim().slice(0, 300);
+      if (cleanKey && cleanVal) extra[cleanKey] = cleanVal;
+    }
+    if (Object.keys(extra).length > 0) {
+      o.extra = extra;
+    }
+  }
   const need = REQ[col];
   if (!partial && need && !o[need] && !(col === 'entries' && (o.img || o.aud))) throw new Error(`${need} is required`);
   if (!partial && col === 'entries' && !o.txt && !o.img && !o.aud) throw new Error('Write something or attach media');
@@ -85,19 +106,146 @@ app.use((_q, res, next) => {
   next();
 });
 app.use(express.static(path.join(process.cwd(), 'public')));
+app.use('/public', express.static(path.join(process.cwd(), 'public')));
+app.get('/public/app.js', (_req, res) => res.type('application/javascript').sendFile(path.join(process.cwd(), 'public', 'app.js')));
+app.get('/app.js', (_req, res) => res.type('application/javascript').sendFile(path.join(process.cwd(), 'public', 'app.js')));
+app.get('/bun.lock', (_req, res) => res.type('text/plain').sendFile(path.join(process.cwd(), 'bun.lock')));
+
+
+
+
+function applyTemplate(templateId: string, ownerId: string, clearExisting = false) {
+  const tmpl = TEMPLATES[templateId];
+  if (!tmpl) return false;
+  if (clearExisting) {
+    db.items = [];
+    db.machines = [];
+    db.costs = [];
+    db.moves = [];
+  }
+  const now = Date.now();
+  for (const it of tmpl.items) {
+    const id = uid();
+    db.items.push({
+      id,
+      name: it.name,
+      unit: it.unit,
+      qty: it.qty,
+      low: it.low,
+      costPrice: it.costPrice,
+      sellPrice: it.sellPrice,
+      extra: it.extra || {},
+      at: now,
+    });
+    if (it.qty > 0) {
+      db.moves.push({
+        id: uid(),
+        itemId: id,
+        name: it.name,
+        qty: it.qty,
+        price: it.costPrice || 0,
+        at: now,
+        by: ownerId,
+        src: 'template',
+      });
+    }
+  }
+  for (const m of tmpl.machines) {
+    db.machines.push({
+      id: uid(),
+      name: m.name,
+      maintenanceCost: m.maintenanceCost,
+      everyDays: m.everyDays,
+      powerKw: m.powerKw,
+      notes: m.notes,
+      extra: m.extra || {},
+      at: now,
+    });
+  }
+  for (const c of tmpl.costs) {
+    db.costs.push({
+      id: uid(),
+      name: c.name,
+      amount: c.amount,
+      period: c.period,
+      extra: c.extra || {},
+      at: now,
+    });
+  }
+  if (tmpl.defaultCurrency && (!db.business?.currency || db.business.currency === '₹')) {
+    db.business.currency = tmpl.defaultCurrency;
+  }
+  commit('items');
+  commit('machines');
+  commit('costs');
+  return true;
+}
 
 // ---- public: first-run setup and login ----
-app.get('/api/state', (_q, res) => res.json({ setup: !!db.business, business: db.business?.name, code: !!process.env.SETUP_CODE }));
+app.get('/api/state', (_q, res) => res.json({
+  setup: !!db.business,
+  business: db.business?.name,
+  type: db.business?.type,
+  currency: db.business?.currency,
+  owner: db.people.find((p: any) => p.isOwner)?.name,
+  code: !!process.env.SETUP_CODE,
+}));
+function doReset() {
+  db.business = null;
+  db.people = [];
+  db.items = [];
+  db.machines = [];
+  db.costs = [];
+  db.signals = [];
+  db.entries = [];
+  db.decisions = [];
+  db.moves = [];
+  sess.clear();
+  save();
+  clients.forEach((c) => {
+    try {
+      c.write('data: reset\n\n');
+      c.end();
+    } catch {}
+  });
+  clients.clear();
+}
+
+app.post('/api/reset-public', (req, res) => {
+  if (process.env.SETUP_CODE && req.body?.code !== process.env.SETUP_CODE) {
+    return res.status(403).json({ error: 'Wrong setup code' });
+  }
+  doReset();
+  res.json({ ok: 1 });
+});
 app.get('/api/schema', (_q, res) => res.json(F));
+app.get('/api/templates', (_q, res) => {
+  res.json(Object.values(TEMPLATES).map((t) => ({
+    id: t.id,
+    name: t.name,
+    category: t.category,
+    icon: t.icon,
+    description: t.description,
+    defaultCurrency: t.defaultCurrency,
+    itemCount: t.items.length,
+    machineCount: t.machines.length,
+    costCount: t.costs.length,
+    sampleItems: t.items.slice(0, 3).map((i) => i.name),
+  })));
+});
 app.post('/api/setup', (req, res) => {
   if (db.business) return res.status(409).json({ error: 'Already set up' });
   const b = req.body || {};
   if (process.env.SETUP_CODE && b.code !== process.env.SETUP_CODE) return res.status(403).json({ error: 'Wrong setup code' });
   const name = String(b.name || '').trim().slice(0, 100), who = String(b.owner || '').trim().slice(0, 100), pin = String(b.pin || '');
   if (!name || !who || pin.length < 4) return res.status(400).json({ error: 'Business name, your name and a PIN of 4+ characters are required' });
-  db.business = { name, type: String(b.type || '').slice(0, 100), currency: String(b.currency || '₹').slice(0, 4) };
+  db.business = { name, type: String(b.type || '').slice(0, 100), currency: String(b.currency || '₹').slice(0, 10) };
   const p = { id: uid(), name: who, role: 'Owner', isOwner: true, pinHash: hash(pin), at: Date.now() };
-  db.people.push(p); commit('people');
+  db.people.push(p);
+  if (b.template && TEMPLATES[b.template]) {
+    applyTemplate(b.template, p.id, false);
+  }
+  commit('people');
   res.json({ token: session(p) });
 });
 app.post('/api/login', (req, res) => {
@@ -134,7 +282,9 @@ app.get('/api/events', auth, (req, res) => {
   res.write('retry: 3000\n\n'); clients.add(res); req.on('close', () => clients.delete(res));
 });
 app.get('/api/all', auth, (req: any, res) => {
-  const o = req.u.owner, me = db.people.find((p: any) => p.id === req.u.id);
+  const o = req.u.owner;
+  const me = db.people.find((p: any) => p.id === req.u.id);
+  if (!me) return res.status(401).json({ error: 'User no longer exists. Please sign in again.' });
   res.json({
     me: { id: me.id, name: me.name, owner: o }, business: db.business,
     people: db.people.map(({ pinHash, salary, ...p }: any) => (o ? { ...p, salary } : p)),
@@ -187,6 +337,18 @@ app.post('/api/entries/:id/confirm', auth, owner, (req: any, res) => {
   e.v = { by: me.name, at: Date.now() }; commit('entries'); res.json({ ok: 1 });
 });
 
+app.post('/api/apply-template', auth, owner, (req: any, res) => {
+  const { templateId, mode } = req.body || {};
+  const ok = applyTemplate(templateId, req.u.id, mode === 'replace');
+  if (!ok) return res.status(400).json({ error: 'Unknown template' });
+  res.json({ ok: 1 });
+});
+
+app.post('/api/reset-business', auth, owner, (_req: any, res) => {
+  doReset();
+  res.json({ ok: 1 });
+});
+
 // ---- generic collections (people, items, machines, costs, signals, entries, decisions) ----
 const known = (req: Request, res: Response, next: NextFunction) => (Object.hasOwn(F, req.params.col) ? next() : res.status(404).json({ error: 'Unknown collection' }));
 app.post('/api/:col', auth, known, (req: any, res) => {
@@ -203,6 +365,10 @@ app.patch('/api/:col/:id', auth, known, (req: any, res) => {
   if (!r) return res.sendStatus(404);
   if (!req.u.owner && !(col === 'entries' && r.by === req.u.id)) return res.status(403).json({ error: 'Not allowed' });
   const o = clean(col, req.body, true); delete o.pin;
+  if (o.extra !== undefined) {
+    r.extra = { ...(r.extra || {}), ...o.extra };
+    delete o.extra;
+  }
   Object.assign(r, o); commit(col); res.json({ ok: 1 });
 });
 app.delete('/api/:col/:id', auth, owner, known, (req: any, res) => {
@@ -212,5 +378,12 @@ app.delete('/api/:col/:id', auth, owner, known, (req: any, res) => {
   db[col].splice(i, 1); commit(col); res.json({ ok: 1 });
 });
 
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) return next();
+  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
+});
+
 app.use((e: any, _q: Request, res: Response, _n: NextFunction) => res.status(400).json({ error: e.message || 'Bad request' }));
-app.listen(Number(process.env.PORT) || 3000, () => console.log('Bahi running on http://localhost:' + (process.env.PORT || 3000)));
+const PORT = Number(process.env.PORT) || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log(`Bahi running on http://0.0.0.0:${PORT}`));
+

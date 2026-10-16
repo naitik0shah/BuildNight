@@ -1,0 +1,35 @@
+{
+  "lockfileVersion": 1,
+  "name": "bahi",
+  "version": "0.2.0",
+  "workspaces": {},
+  "dependencies": {
+    "express": {
+      "version": "4.19.2",
+      "integrity": "sha512-5gbiBlKmFTzCYJtIf1VDtx45W45lXgtP/U/N86ORU3akZ974u68KYT8gk5vYhTOp8W8Y51m4nffD18mU/hN+Ow==",
+      "resolved": "https://registry.npmjs.org/express/-/express-4.19.2.tgz"
+    }
+  },
+  "devDependencies": {
+    "@types/express": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.org/@types/express/-/express-4.17.21.tgz"
+    },
+    "@types/node": {
+      "version": "20.14.0",
+      "resolved": "https://registry.npmjs.org/@types/node/-/node-20.14.0.tgz"
+    },
+    "esbuild": {
+      "version": "0.23.0",
+      "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.23.0.tgz"
+    },
+    "tsx": {
+      "version": "4.16.0",
+      "resolved": "https://registry.npmjs.org/tsx/-/tsx-4.16.0.tgz"
+    },
+    "typescript": {
+      "version": "5.5.0",
+      "resolved": "https://registry.npmjs.org/typescript/-/typescript-5.5.0.tgz"
+    }
+  }
+}
