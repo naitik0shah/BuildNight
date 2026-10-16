@@ -13,7 +13,7 @@ let A: any = null;
 let SC: any = null;
 let META: any = null;
 let tab = 'log';
-let dr: any = { kind: 'note', when: 'now', extraRows: [] };
+let dr: any = { kind: 'note', when: 'now', extraRows: [], files: [] };
 let imp: any = null;
 let pend = false;
 let mr: any = null;
@@ -23,6 +23,20 @@ let stockViewMode: 'cards' | 'table' = 'cards';
 let activeModal: any = null;
 let templatesCache: any[] = [];
 let chosenTemplateId: string = '';
+
+// Voice and Video Recording states
+let voiceRecorder: MediaRecorder | null = null;
+let voiceChunks: Blob[] = [];
+let voiceTimerInterval: any = null;
+let voiceSeconds = 0;
+let isRecordingVoice = false;
+
+let videoStream: MediaStream | null = null;
+let videoRecorder: MediaRecorder | null = null;
+let videoChunks: Blob[] = [];
+let videoTimerInterval: any = null;
+let videoSeconds = 0;
+let isVideoRecording = false;
 
 const API_BASE = resolveApiBase();
 
@@ -206,28 +220,40 @@ function renderOnboarding() {
 }
 
 function renderSignIn() {
-  const ownerName = META?.owner || '';
+  const users: any[] = META?.users || (META?.owner ? [{ name: META.owner, role: 'Owner', isOwner: true }] : []);
+  const owner = users.find((u) => u.isOwner);
+  const defaultSelected = owner ? owner.name : (users[0]?.name || '');
+
   $('#app').innerHTML = `
-    <div style="max-width: 440px; margin: 40px auto 20px;">
+    <div style="max-width: 480px; margin: 40px auto 20px;">
       <div style="text-align: center; margin-bottom: 24px;">
         <div class="brand-seal" style="width: 44px; height: 44px; margin: 0 auto 10px; font-size: 26px;">ब</div>
         <h1>${esc(META.business || 'Bahi')}</h1>
         <p class="m">${esc(META.type || 'Shop Ledger')}</p>
       </div>
       <div class="c">
-        <label for="ln">Your Name</label>
-        ${inp('ln', 'Enter your name', 'text', ownerName)}
-        ${ownerName ? `
-          <div style="margin: -4px 0 8px;">
-            <small class="m">Quick select: </small>
-            <button type="button" class="chip on" data-a="fillOwner" data-name="${esc(ownerName)}" style="font-size: 11px; padding: 2px 8px;">👤 ${esc(ownerName)} (Owner)</button>
+        <label>Select Team Member or Enter Name</label>
+        ${users.length > 0 ? `
+          <div style="display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px;">
+            ${users.map((u: any) => `
+              <button type="button" class="chip ${u.name === defaultSelected ? 'on' : ''}" data-a="fillUser" data-name="${esc(u.name)}" style="font-size: 12px; padding: 4px 10px;">
+                ${u.isOwner ? '👑' : '👷'} <b>${esc(u.name)}</b> <span style="opacity: 0.7; font-size: 11px;">(${esc(u.role)})</span>
+              </button>
+            `).join('')}
           </div>
         ` : ''}
 
-        <label for="lp">PIN</label>
-        ${inp('lp', 'Enter your PIN', 'password')}
+        <label for="ln">Name or WhatsApp Number</label>
+        ${inp('ln', 'Enter your name or phone', 'text', defaultSelected)}
 
-        <button class="btn" data-a="login" style="width: 100%; margin-top: 10px; padding: 12px; font-size: 15px;">Sign In to Bahi</button>
+        <label for="lp" style="margin-top: 10px;">Sign-In PIN (4+ digits)</label>
+        ${inp('lp', 'Enter your 4-digit PIN', 'password')}
+
+        <button class="btn" data-a="login" style="width: 100%; margin-top: 14px; padding: 12px; font-size: 15px;">Sign In to Bahi</button>
+
+        <p class="m" style="font-size: 12px; margin-top: 12px; text-align: center; line-height: 1.4;">
+          🔒 Staff accounts have full operational access to log operational notes, adjust inventory, record sales, and monitor equipment.
+        </p>
 
         <div style="margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); text-align: center;">
           <p class="m" style="margin-bottom: 8px;">Want to start fresh with a different business?</p>
@@ -313,76 +339,188 @@ function draw() {
 }
 
 // ==================== TAB: LOG ====================
+const renderEntryAttachments = (e: any) => {
+  const files: any[] = [];
+  if (Array.isArray(e.files)) {
+    files.push(...e.files);
+  }
+  if (e.img) {
+    files.push({ id: '__legacy_img', name: 'Photo', type: 'image/jpeg', category: 'image', data: e.img, isLegacyImg: true });
+  }
+  if (e.aud) {
+    files.push({ id: '__legacy_aud', name: 'Voice Note', type: 'audio/webm', category: 'audio', data: e.aud, isLegacyAud: true });
+  }
+  if (files.length === 0) return '';
+
+  const canEdit = !!(A?.me?.owner || e.by === A?.me?.id);
+
+  return `
+    <div class="attachment-grid">
+      ${files.map((f: any) => {
+        const removeBtn = canEdit
+          ? `<button class="att-del-btn" data-a="removeEntryAttachment" data-eid="${e.id}" data-fid="${f.id}" data-legacy="${f.isLegacyImg ? 'img' : f.isLegacyAud ? 'aud' : ''}" title="Remove this file">✕</button>`
+          : '';
+
+        if (f.category === 'image') {
+          return `
+            <div class="att-card">
+              ${removeBtn}
+              <img src="${esc(f.data)}" alt="${esc(f.name)}" style="cursor: pointer;" data-a="viewFullImage" data-src="${esc(f.data)}" title="Click to view full photo">
+              <div class="att-info">🖼️ ${esc(f.name)}</div>
+            </div>
+          `;
+        } else if (f.category === 'audio') {
+          return `
+            <div class="att-card">
+              ${removeBtn}
+              <audio controls src="${esc(f.data)}"></audio>
+              <div class="att-info">🎙️ ${esc(f.name)}</div>
+            </div>
+          `;
+        } else if (f.category === 'video') {
+          return `
+            <div class="att-card">
+              ${removeBtn}
+              <video controls src="${esc(f.data)}"></video>
+              <div class="att-info">📹 ${esc(f.name)}</div>
+            </div>
+          `;
+        } else {
+          return `
+            <div class="att-card" style="justify-content: center; min-height: 85px;">
+              ${removeBtn}
+              <div style="font-size: 26px; text-align: center;">📄</div>
+              <div class="att-info" style="text-align: center;">
+                <a href="${esc(f.data)}" download="${esc(f.name)}" style="color: var(--ink); text-decoration: underline;">${esc(f.name)}</a>
+              </div>
+            </div>
+          `;
+        }
+      }).join('')}
+    </div>
+  `;
+};
+
 const entry = (e: any) => {
   const m = P(e.by);
+  const canModify = !!(A?.me?.owner || e.by === A?.me?.id);
+
   return `
     <div class="e">
       <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px;">
         <div>
           <b>${esc(m.name)}</b> <small style="color: var(--mute);">${esc(m.role || '')}</small>
           <span class="tag">${esc(e.kind)}</span>
-          ${e.an ? '<span class="tag" style="color: var(--acc);">for analysis</span>' : ''}
-          ${e.src === 'whatsapp' ? '<span class="tag">WhatsApp</span>' : ''}
+          ${e.an ? '<span class="tag" style="color: var(--acc); font-weight: 600;">🔍 For Analysis / Processing</span>' : ''}
+          ${e.src === 'whatsapp' ? '<span class="tag" style="color: #128c7e; border-color: rgba(37,211,102,0.3);">💬 WhatsApp</span>' : ''}
         </div>
         <small style="color: var(--mute);">${fmt(e.ev)}</small>
       </div>
+
       <div style="margin: 8px 0; font-size: 15px; line-height: 1.45;">${esc(e.txt)}</div>
-      ${e.img ? `<img class="th" src="${esc(e.img)}" alt="Attached photo">` : ''}
-      ${e.aud ? `<audio controls src="${esc(e.aud)}"></audio>` : ''}
-      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px;">
+
+      ${renderEntryAttachments(e)}
+
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 10px;">
         <small style="color: var(--mute);">
           ${e.about ? 'About ' + esc(e.about) + ' · ' : ''}
-          ${e.v ? 'Verified by ' + esc(e.v.by) : 'Unverified'}
+          ${e.v ? '✓ Verified by ' + esc(e.v.by) : 'Unverified'}
           ${e.up - e.ev > 216e5 ? ' · logged late' : ''}
         </small>
         <div class="row" style="margin: 0;">
+          ${canModify ? `
+            <button class="chip" data-a="editEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px;">✏️ Edit</button>
+            <button class="chip" data-a="delEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px; color: var(--acc);" title="Delete note">🗑️ Delete</button>
+          ` : ''}
           ${A.me.owner && !e.v ? `<button class="chip" data-a="confirm" data-i="${e.id}">Confirm Note</button>` : ''}
-          ${e.kind === 'favour' && !e.settled && (A.me.owner || e.by === A.me.id) ? `<button class="chip" data-a="settle" data-i="${e.id}">Mark Settled</button>` : ''}
+          ${e.kind === 'favour' && !e.settled && canModify ? `<button class="chip" data-a="settle" data-i="${e.id}">Mark Settled</button>` : ''}
         </div>
       </div>
     </div>
   `;
 };
 
-const log = () => `
-  <h2>Timeline & Operations Log</h2>
-  <div class="c">
-    <textarea id="t" rows="3" placeholder="What happened today? (Customer remark, supply delay, customer credit, staff note...) Start with /analyze to flag for review.">${esc(dr.t || '')}</textarea>
-    ${dr.img ? `<img class="th" src="${dr.img}" alt="Photo to attach">` : ''}
-    ${dr.aud ? `<audio controls src="${dr.aud}"></audio>` : ''}
+const log = () => {
+  dr.files = dr.files || [];
+  const files: any[] = dr.files;
 
-    <div class="row">
-      <label class="chip">📷 Attach Photo<input type="file" accept="image/*" id="pf" hidden></label>
-      <button class="chip ${mr ? 'on' : ''}" data-a="rec">${mr ? '🔴 Stop recording' : '🎙️ Voice note'}</button>
-      <button class="chip ${dr.an ? 'on' : ''}" data-a="an">${dr.an ? '✓ Flagged for analysis' : 'Send to analysis'}</button>
-    </div>
+  return `
+    <h2>Timeline & Operations Log</h2>
+    <div class="c">
+      <textarea id="t" rows="3" placeholder="What happened today? (Customer remark, supply delay, customer credit, staff note...) Start with /save or /analyze to flag for review.">${esc(dr.t || '')}</textarea>
 
-    <div style="margin: 8px 0;">
-      <small style="font-weight: 600; display: block; margin-bottom: 4px;">Kind of note:</small>
-      <div class="row">
-        ${KINDS.map((k) => `<button class="chip ${dr.kind === k ? 'on' : ''}" data-a="kind" data-v="${k}">${k}</button>`).join('')}
+      ${files.length > 0 ? `
+        <div style="margin: 10px 0 6px;">
+          <small style="font-weight: 600; display: block; margin-bottom: 4px;">Attached Files & Recordings (${files.length}):</small>
+          <div class="attachment-grid">
+            ${files.map((f: any) => `
+              <div class="att-card">
+                <button type="button" class="att-del-btn" data-a="delDraftFile" data-id="${f.id}" title="Remove this file">✕</button>
+                ${f.category === 'image' ? `
+                  <img src="${esc(f.data)}" alt="${esc(f.name)}">
+                  <div class="att-info">🖼️ ${esc(f.name)}</div>
+                ` : f.category === 'audio' ? `
+                  <audio controls src="${esc(f.data)}"></audio>
+                  <div class="att-info">🎙️ ${esc(f.name)}</div>
+                ` : f.category === 'video' ? `
+                  <video controls src="${esc(f.data)}"></video>
+                  <div class="att-info">📹 ${esc(f.name)}</div>
+                ` : `
+                  <div style="font-size: 26px; text-align: center; margin-top: 10px;">📄</div>
+                  <div class="att-info" style="text-align: center;">${esc(f.name)}</div>
+                `}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="row" style="margin: 10px 0;">
+        <label class="chip" style="cursor: pointer;">
+          📁 Upload Files
+          <input type="file" multiple id="fileUploadInput" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" hidden>
+        </label>
+
+        <button type="button" class="chip ${isRecordingVoice ? 'on' : ''}" data-a="toggleVoiceRecord">
+          ${isRecordingVoice ? '<span class="recording-badge" id="voiceTimerBadge">🔴 Recording (' + voiceSeconds + 's) - Tap to Stop</span>' : '🎙️ Record Voice Note'}
+        </button>
+
+        <button type="button" class="chip ${isVideoRecording ? 'on' : ''}" data-a="openVideoModal">
+          📹 Record Video
+        </button>
+
+        <button type="button" class="chip ${dr.an ? 'on' : ''}" data-a="an">
+          ${dr.an ? '✓ Flagged for Analysis' : '🔍 Mark for Analysis'}
+        </button>
+      </div>
+
+      <div style="margin: 8px 0;">
+        <small style="font-weight: 600; display: block; margin-bottom: 4px;">Kind of note:</small>
+        <div class="row">
+          ${KINDS.map((k) => `<button class="chip ${dr.kind === k ? 'on' : ''}" data-a="kind" data-v="${k}">${k}</button>`).join('')}
+        </div>
+      </div>
+
+      <div style="margin: 8px 0;">
+        <small style="font-weight: 600; display: block; margin-bottom: 4px;">When did it happen?</small>
+        <div class="row">
+          ${[['now', 'Just now'], ['earlier', 'Earlier today'], ['yday', 'Yesterday'], ['pick', 'Pick time']].map((w) => `<button class="chip ${dr.when === w[0] ? 'on' : ''}" data-a="when" data-v="${w[0]}">${w[1]}</button>`).join('')}
+        </div>
+      </div>
+      ${dr.when === 'pick' ? `<input type="datetime-local" id="dt" value="${esc(dr.dt || '')}">` : ''}
+
+      <input id="ab" placeholder="Who or what is this about? (Customer, Supplier, Driver... optional)" value="${esc(dr.ab || '')}">
+      <div style="margin-top: 12px;">
+        <button class="btn" data-a="post" style="padding: 10px 24px; font-size: 15px;">Post Entry</button>
       </div>
     </div>
 
-    <div style="margin: 8px 0;">
-      <small style="font-weight: 600; display: block; margin-bottom: 4px;">When did it happen?</small>
-      <div class="row">
-        ${[['now', 'Just now'], ['earlier', 'Earlier today'], ['yday', 'Yesterday'], ['pick', 'Pick time']].map((w) => `<button class="chip ${dr.when === w[0] ? 'on' : ''}" data-a="when" data-v="${w[0]}">${w[1]}</button>`).join('')}
-      </div>
+    <div style="margin-top: 24px;">
+      <h3>Past Notes</h3>
+      ${A.entries.slice().sort((a: any, b: any) => b.ev - a.ev).map(entry).join('') || '<p class="m" style="padding: 20px 0;">No entries recorded yet. Add your first note above.</p>'}
     </div>
-    ${dr.when === 'pick' ? `<input type="datetime-local" id="dt" value="${esc(dr.dt || '')}">` : ''}
-
-    <input id="ab" placeholder="Who or what is this about? (Customer, Supplier, Driver... optional)" value="${esc(dr.ab || '')}">
-    <div style="margin-top: 10px;">
-      <button class="btn" data-a="post" style="padding: 10px 24px;">Post Entry</button>
-    </div>
-  </div>
-
-  <div style="margin-top: 24px;">
-    <h3>Past Notes</h3>
-    ${A.entries.slice().sort((a: any, b: any) => b.ev - a.ev).map(entry).join('') || '<p class="m" style="padding: 20px 0;">No entries recorded yet. Add your first note above.</p>'}
-  </div>
-`;
+  `;
+};
 
 // ==================== TAB: STOCK ====================
 const IMP: any = {
@@ -1057,6 +1195,50 @@ const biz = () => {
       ` : ''}
     </div>
 
+    <!-- Database Storage Backend Status & Render Setup -->
+    <div class="c" style="border-left: 4px solid ${A.storage?.type === 'postgres' && A.storage?.connected ? 'var(--green)' : '#eab308'};">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <h3 style="margin-bottom: 2px;">Database & Storage Backend</h3>
+          <p class="m" style="margin-bottom: 0;">
+            ${A.storage?.type === 'postgres' && A.storage?.connected
+              ? '🟢 <b>PostgreSQL Database Active:</b> Your data is permanently saved in PostgreSQL.'
+              : '🟡 <b>Local JSON File Storage:</b> Currently saving to local storage. Connect a PostgreSQL database to persist data on Render.'}
+          </p>
+        </div>
+        <span class="tag" style="font-weight: 600; font-size: 12px; padding: 4px 10px;">
+          ${A.storage?.type === 'postgres' ? 'PostgreSQL' : 'JSON Storage'}
+        </span>
+      </div>
+
+      <details class="accordion" style="margin-top: 12px;">
+        <summary>⚙️ How to Connect Render Database (https://buildnight.onrender.com/)</summary>
+        <div class="acc-body" style="font-size: 13px; line-height: 1.6;">
+          <p>To persist data on Render across restarts and deployments:</p>
+          <ol style="padding-left: 20px; margin: 8px 0;">
+            <li>Go to your Render Dashboard (<b>https://dashboard.render.com</b>).</li>
+            <li>Click <b>New +</b> &rarr; <b>PostgreSQL</b> to create a database instance.</li>
+            <li>Copy the <b>Internal Database URL</b> (starts with <code>postgres://...</code>).</li>
+            <li>Navigate to your Web Service (<b>buildnight</b>) &rarr; <b>Environment</b> tab.</li>
+            <li>Add environment variable: <b><code>DATABASE_URL</code></b> with your copied connection string.</li>
+            <li>Click <b>Save Changes</b>. Bahi connects automatically, creates tables, and saves all data permanently!</li>
+          </ol>
+          <div class="code-box">DATABASE_URL=postgres://user:password@dpg-xxx:5432/bahi_db</div>
+        </div>
+      </details>
+    </div>
+
+    <!-- WhatsApp Business Webhook Card -->
+    <div class="c" style="border-left: 4px solid #128c7e;">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+        <div>
+          <h3 style="margin-bottom: 2px;">💬 WhatsApp Operations Webhook</h3>
+          <p class="m" style="margin-bottom: 0;">Capture notes from WhatsApp business groups starting with <code>/save</code>.</p>
+        </div>
+        <button class="btn sm" data-a="openWaModal" style="background: #128c7e; border-color: #128c7e;">Setup & Test WhatsApp</button>
+      </div>
+    </div>
+
     <!-- Running Costs (Owner Only) -->
     ${o ? `
       <div class="c">
@@ -1293,7 +1475,7 @@ function renderModal() {
           </div>
         ` : '<p class="m" style="margin: 6px 0 12px;">No custom attributes specified for this item.</p>'}
 
-        ${A.me.owner ? `
+        ${A.me ? `
           <details class="accordion" style="margin-top: 14px;">
             <summary>Edit Item Details & Attributes</summary>
             <div class="acc-body">
@@ -1336,6 +1518,169 @@ function renderModal() {
 
         <div style="margin-top: 18px; text-align: right;">
           <button class="chip" data-a="closeModal">Close Window</button>
+        </div>
+      </div>
+    `;
+    mc.hidden = false;
+  } else if (activeModal.type === 'whatsapp') {
+    const origin = API_BASE || window.location.origin;
+    const webhookUrl = `${origin}/api/whatsapp`;
+    const token = A?.business?.waVerify || 'bahi_whatsapp_token';
+
+    mc.innerHTML = `
+      <div class="modal-box" style="max-width: 620px;">
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 24px;">💬</span>
+            <div>
+              <h3>WhatsApp Group & Operations Webhook</h3>
+              <div class="m" style="margin: 0;">Automated capture of shop group messages and ledger updates</div>
+            </div>
+          </div>
+          <button class="chip" data-a="closeModal" style="padding: 4px 10px;">✕</button>
+        </div>
+
+        <div style="font-size: 14px; line-height: 1.55;">
+          <div style="background: rgba(37, 211, 102, 0.08); border: 1px solid rgba(37, 211, 102, 0.25); border-radius: 8px; padding: 12px; margin-bottom: 16px;">
+            <h4 style="color: #075e54; margin-bottom: 4px;">🚀 How the WhatsApp Group Integration Works</h4>
+            <p style="margin: 0; font-size: 13px; color: var(--ink);">
+              Add your WhatsApp bot or Business phone number to your shop's staff group (e.g. <i>"Kirana Shop Operations"</i>).
+              When team members or owners post notes starting with <b><code>/save</code></b>, Bahi automatically catches the text, flags it for <b>Analysis & Processing</b>, tags the sender, and saves it directly to your Operations Log in real-time!
+            </p>
+          </div>
+
+          <label style="font-weight: 600;">1. Webhook Callback URL</label>
+          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px;">
+            <input readonly value="${esc(webhookUrl)}" style="margin: 0; font-family: var(--font-mono); font-size: 12px;">
+            <button class="btn sm" data-a="copyText" data-text="${esc(webhookUrl)}">Copy URL</button>
+          </div>
+
+          <label style="font-weight: 600;">2. Webhook Verify Token</label>
+          <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 14px;">
+            <input readonly value="${esc(token)}" style="margin: 0; font-family: var(--font-mono); font-size: 12px;">
+            <button class="btn sm" data-a="copyText" data-text="${esc(token)}">Copy Token</button>
+          </div>
+
+          <h4 style="margin-top: 14px; margin-bottom: 6px;">Supported WhatsApp Commands</h4>
+          <ul style="padding-left: 20px; font-size: 13px; color: var(--ink-subtle); margin-bottom: 16px;">
+            <li><b><code>/save [text]</code></b> &rarr; Saved to Bahi and tagged <b>🔍 For Analysis / Processing</b>.</li>
+            <li><b><code>/analyze [text]</code></b> &rarr; Saved and flagged for immediate management review.</li>
+            <li><b><code>/issue [text]</code></b> &rarr; Logged as an urgent equipment or shop issue.</li>
+            <li><b>Plain message / photo</b> &rarr; Logged as a standard operational note under sender's name.</li>
+          </ul>
+
+          <div style="border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px;">
+            <h4 style="margin-bottom: 6px;">🧪 Interactive Webhook Simulator (Test Live)</h4>
+            <p class="m">Test sending a simulated WhatsApp group message to verify your timeline updates instantly:</p>
+
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px;">
+              <div>
+                <label>Sender Phone (WhatsApp)</label>
+                <input id="wa_test_phone" value="${esc(A?.people?.[0]?.phone || '919876543210')}" placeholder="e.g. 919876543210">
+              </div>
+              <div style="display: flex; align-items: center; padding-top: 18px;">
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
+                  <input type="checkbox" id="wa_test_is_group" checked style="width: auto; margin: 0;">
+                  Sent from Business Group
+                </label>
+              </div>
+            </div>
+
+            <label>Message Content (starts with /save)</label>
+            <textarea id="wa_test_msg" rows="2" style="font-family: inherit; font-size: 13px;">/save Received 10 bags of basmati rice from supplier; 2 bags damaged in transit</textarea>
+
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+              <button class="btn" id="wa_send_btn" data-a="sendWaTest">🚀 Send Simulated WhatsApp Message</button>
+              <div id="wa_test_result"></div>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 18px; text-align: right;">
+          <button class="chip" data-a="closeModal">Close Window</button>
+        </div>
+      </div>
+    `;
+    mc.hidden = false;
+  } else if (activeModal.type === 'video') {
+    mc.innerHTML = `
+      <div class="modal-box" style="max-width: 520px;">
+        <div class="modal-header">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <span style="font-size: 22px;">📹</span>
+            <div>
+              <h3>Record Video Note</h3>
+              <div class="m" style="margin: 0;">Record a short video clip for your shop journal</div>
+            </div>
+          </div>
+          <button class="chip" data-a="closeVideoModal" style="padding: 4px 10px;">✕</button>
+        </div>
+
+        <div style="text-align: center;">
+          <video id="camPreview" autoplay playsinline muted style="width: 100%; height: 260px; background: #000; border-radius: 8px; object-fit: cover;"></video>
+          <div id="camError" class="m" style="color: var(--acc); font-weight: 500; margin: 8px 0;" hidden></div>
+          <div id="vidTimerText" style="font-weight: 700; margin: 8px 0; font-size: 15px;">
+            ${isVideoRecording ? `🔴 Recording: ${videoSeconds}s` : 'Camera ready'}
+          </div>
+
+          <div class="row" style="justify-content: center; margin-top: 12px; gap: 10px;">
+            ${!isVideoRecording ? `
+              <button class="btn" data-a="startVideoRec" style="background: var(--acc); border-color: var(--acc); padding: 10px 20px;">
+                🔴 Start Recording Video
+              </button>
+            ` : `
+              <button class="btn" data-a="stopVideoRec" style="padding: 10px 20px;">
+                ⏹️ Stop & Attach Video
+              </button>
+            `}
+          </div>
+
+          <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px;" class="m">
+            Or select an existing video file from your device:
+            <div style="margin-top: 6px;">
+              <input type="file" id="vidUploadInput" accept="video/*" capture="environment" style="font-size: 12px;">
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 14px; text-align: right;">
+          <button class="chip" data-a="closeVideoModal">Cancel</button>
+        </div>
+      </div>
+    `;
+    mc.hidden = false;
+  } else if (activeModal.type === 'image') {
+    mc.innerHTML = `
+      <div class="modal-box" style="max-width: 800px; text-align: center; padding: 16px;">
+        <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+          <button class="chip" data-a="closeModal" style="padding: 4px 10px;">✕ Close</button>
+        </div>
+        <img src="${esc(activeModal.src)}" alt="Full photo" style="max-width: 100%; max-height: 75vh; border-radius: 8px; object-fit: contain;">
+      </div>
+    `;
+    mc.hidden = false;
+  } else if (activeModal.type === 'editEntry') {
+    const e = A?.entries?.find((x: any) => x.id === activeModal.entryId);
+    if (!e) { activeModal = null; mc.hidden = true; return; }
+    mc.innerHTML = `
+      <div class="modal-box">
+        <div class="modal-header">
+          <h3>Edit Operations Note</h3>
+          <button class="chip" data-a="closeModal" style="padding: 4px 10px;">✕</button>
+        </div>
+        <label>Note Text</label>
+        <textarea id="edit_entry_txt" rows="4">${esc(e.txt || '')}</textarea>
+        <label>Who or what is this about?</label>
+        <input id="edit_entry_about" value="${esc(e.about || '')}">
+        <div style="margin: 10px 0;">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px;">
+            <input type="checkbox" id="edit_entry_an" ${e.an ? 'checked' : ''} style="width: auto; margin: 0;">
+            Marked for Analysis & Processing
+          </label>
+        </div>
+        <div class="row" style="justify-content: space-between; margin-top: 14px;">
+          <button class="btn" data-a="saveEntryEdit" data-id="${e.id}">Save Changes</button>
+          <button class="chip" data-a="closeModal">Cancel</button>
         </div>
       </div>
     `;
@@ -1518,27 +1863,231 @@ const ACT: any = {
     await refresh();
   },
 
-  async rec() {
-    if (mr) {
-      mr.stop();
+  delDraftFile(d: any) {
+    dr.files = (dr.files || []).filter((f: any) => f.id !== d.id);
+    draw();
+  },
+
+  async toggleVoiceRecord() {
+    if (isRecordingVoice) {
+      if (voiceRecorder && voiceRecorder.state !== 'inactive') {
+        voiceRecorder.stop();
+      }
+      isRecordingVoice = false;
       return;
     }
+
     try {
       const st = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const ch: Blob[] = [];
-      mr = new MediaRecorder(st);
-      mr.ondataavailable = (e: any) => ch.push(e.data);
-      mr.onstop = () => {
-        st.getTracks().forEach((t) => t.stop());
-        const f = new FileReader();
-        f.onload = () => { dr.aud = f.result; mr = null; draw(); };
-        f.readAsDataURL(new Blob(ch, { type: mr.mimeType }));
+      voiceChunks = [];
+      voiceSeconds = 0;
+      isRecordingVoice = true;
+      voiceRecorder = new MediaRecorder(st);
+      voiceRecorder.ondataavailable = (e: any) => {
+        if (e.data.size > 0) voiceChunks.push(e.data);
       };
-      mr.start();
+      voiceRecorder.onstop = () => {
+        st.getTracks().forEach((track) => track.stop());
+        clearInterval(voiceTimerInterval);
+        isRecordingVoice = false;
+        const blob = new Blob(voiceChunks, { type: voiceRecorder?.mimeType || 'audio/webm' });
+        const reader = new FileReader();
+        reader.onload = () => {
+          dr.files = dr.files || [];
+          const timeStr = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+          dr.files.push({
+            id: 'aud_' + Math.random().toString(36).slice(2, 9),
+            name: `Voice note (${timeStr})`,
+            type: blob.type,
+            category: 'audio',
+            size: blob.size,
+            data: String(reader.result),
+          });
+          draw();
+        };
+        reader.readAsDataURL(blob);
+      };
+      voiceRecorder.start();
+      voiceTimerInterval = setInterval(() => {
+        voiceSeconds++;
+        const el = $('#voiceTimerBadge');
+        if (el) el.textContent = `🔴 Recording (${voiceSeconds}s) - Tap to Stop`;
+      }, 1000);
       draw();
     } catch (e: any) {
       alert('Could not open microphone: ' + e.message);
     }
+  },
+
+  async openVideoModal() {
+    activeModal = { type: 'video' };
+    renderModal();
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: true,
+      });
+      const videoEl = $('#camPreview') as HTMLVideoElement;
+      if (videoEl) {
+        videoEl.srcObject = videoStream;
+        videoEl.play();
+      }
+    } catch (err: any) {
+      console.warn('Camera could not be opened:', err);
+      const errBox = $('#camError');
+      if (errBox) {
+        errBox.textContent = 'Camera not available or access denied. You can record or select a video file using the option below.';
+        errBox.hidden = false;
+      }
+    }
+  },
+
+  closeVideoModal() {
+    if (videoStream) {
+      videoStream.getTracks().forEach((track) => track.stop());
+      videoStream = null;
+    }
+    if (videoRecorder && videoRecorder.state !== 'inactive') {
+      videoRecorder.stop();
+    }
+    clearInterval(videoTimerInterval);
+    isVideoRecording = false;
+    videoRecorder = null;
+    activeModal = null;
+    draw();
+  },
+
+  startVideoRec() {
+    if (!videoStream) {
+      alert('Camera stream not ready. Please allow camera access or choose a video file below.');
+      return;
+    }
+    videoChunks = [];
+    videoSeconds = 0;
+    isVideoRecording = true;
+    try {
+      videoRecorder = new MediaRecorder(videoStream);
+      videoRecorder.ondataavailable = (e: any) => {
+        if (e.data.size > 0) videoChunks.push(e.data);
+      };
+      videoRecorder.onstop = () => {
+        clearInterval(videoTimerInterval);
+        const blob = new Blob(videoChunks, { type: videoRecorder?.mimeType || 'video/webm' });
+        const reader = new FileReader();
+        reader.onload = () => {
+          dr.files = dr.files || [];
+          const timeStr = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+          dr.files.push({
+            id: 'vid_' + Math.random().toString(36).slice(2, 9),
+            name: `Video note (${timeStr})`,
+            type: blob.type,
+            category: 'video',
+            size: blob.size,
+            data: String(reader.result),
+          });
+          ACT.closeVideoModal();
+        };
+        reader.readAsDataURL(blob);
+      };
+      videoRecorder.start();
+      videoTimerInterval = setInterval(() => {
+        videoSeconds++;
+        const timerEl = $('#vidTimerText');
+        if (timerEl) timerEl.textContent = `🔴 Recording: ${videoSeconds}s`;
+      }, 1000);
+      renderModal();
+    } catch (err: any) {
+      alert('Could not start video recorder: ' + err.message);
+    }
+  },
+
+  stopVideoRec() {
+    if (videoRecorder && videoRecorder.state !== 'inactive') {
+      videoRecorder.stop();
+    }
+  },
+
+  viewFullImage(d: any) {
+    activeModal = { type: 'image', src: d.src };
+    renderModal();
+  },
+
+  openWaModal() {
+    activeModal = { type: 'whatsapp' };
+    renderModal();
+  },
+
+  async sendWaTest() {
+    const phone = $('#wa_test_phone')?.value?.trim() || '+91 98765 43210';
+    const text = $('#wa_test_msg')?.value?.trim();
+    const isGroup = $('#wa_test_is_group')?.checked;
+    if (!text) {
+      alert('Please enter message text (starts with /save)');
+      return;
+    }
+    const btn = $('#wa_send_btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+    try {
+      await api('POST', 'whatsapp/test', { from: phone, text, isGroup });
+      const resBox = $('#wa_test_result');
+      if (resBox) {
+        resBox.innerHTML = '<span style="color: var(--green); font-weight: 600; font-size: 13px;">✓ Message received & note saved!</span>';
+      }
+      await refresh();
+    } catch (err: any) {
+      alert('Test failed: ' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = '🚀 Send Simulated WhatsApp Message'; }
+    }
+  },
+
+  copyText(d: any) {
+    if (!d.text) return;
+    navigator.clipboard?.writeText(d.text).then(() => {
+      alert('Copied to clipboard: ' + d.text);
+    }).catch(() => {
+      prompt('Copy URL/Token:', d.text);
+    });
+  },
+
+  fillUser(d: any) {
+    const nameInp = $('#ln');
+    if (nameInp) nameInp.value = d.name;
+    $$('[data-a="fillUser"]').forEach((b: any) => b.classList.toggle('on', b.dataset.name === d.name));
+    const pinInp = $('#lp');
+    if (pinInp) pinInp.focus();
+  },
+
+  async delEntry(d: any) {
+    if (!confirm('Are you sure you want to delete this note?')) return;
+    await api('DELETE', `entries/${d.i}`);
+    await refresh();
+  },
+
+  editEntry(d: any) {
+    activeModal = { type: 'editEntry', entryId: d.i };
+    renderModal();
+  },
+
+  async saveEntryEdit(d: any) {
+    const txt = $('#edit_entry_txt')?.value?.trim();
+    const about = $('#edit_entry_about')?.value?.trim();
+    const an = $('#edit_entry_an')?.checked;
+    await api('PATCH', `entries/${d.id}`, { txt, about, an });
+    activeModal = null;
+    await refresh();
+  },
+
+  async removeEntryAttachment(d: any) {
+    if (!confirm('Remove this attachment?')) return;
+    if (d.legacy === 'img') {
+      await api('PATCH', `entries/${d.eid}`, { removeImg: true });
+    } else if (d.legacy === 'aud') {
+      await api('PATCH', `entries/${d.eid}`, { removeAud: true });
+    } else {
+      await api('PATCH', `entries/${d.eid}`, { removeFileId: d.fid });
+    }
+    await refresh();
   },
 
   async post() {
@@ -1552,8 +2101,21 @@ const ACT: any = {
     if (dr.when === 'yday') ev -= D;
     if (dr.when === 'pick' && $('#dt')?.value) ev = new Date($('#dt').value).getTime();
 
-    await api('POST', 'entries', { txt: t, kind: dr.kind, about: $('#ab')?.value?.trim(), ev, an, img: dr.img, aud: dr.aud });
-    dr = { kind: 'note', when: 'now' };
+    const files = dr.files || [];
+    if (!t && files.length === 0) {
+      alert('Please write a note or attach files/recordings.');
+      return;
+    }
+
+    await api('POST', 'entries', {
+      txt: t,
+      kind: dr.kind,
+      about: $('#ab')?.value?.trim(),
+      ev,
+      an,
+      files,
+    });
+    dr = { kind: 'note', when: 'now', files: [] };
     await refresh();
   },
 
@@ -1687,6 +2249,54 @@ document.addEventListener('input', (e: any) => {
 
 document.addEventListener('change', (e: any) => {
   const t = e.target;
+  // Handle multi-file attachments of any type
+  if (t.id === 'fileUploadInput' && t.files && t.files.length) {
+    dr.files = dr.files || [];
+    Array.from(t.files as FileList).forEach((file: File) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const category = file.type.startsWith('image/')
+          ? 'image'
+          : file.type.startsWith('audio/')
+          ? 'audio'
+          : file.type.startsWith('video/')
+          ? 'video'
+          : 'file';
+        dr.files.push({
+          id: 'f_' + Math.random().toString(36).slice(2, 9),
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          category,
+          size: file.size,
+          data: String(reader.result),
+        });
+        draw();
+      };
+      reader.readAsDataURL(file);
+    });
+    t.value = '';
+  }
+
+  // Handle video file upload in video modal
+  if (t.id === 'vidUploadInput' && t.files && t.files[0]) {
+    const file = t.files[0];
+    const reader = new FileReader();
+    reader.onload = () => {
+      dr.files = dr.files || [];
+      const timeStr = new Date().toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' });
+      dr.files.push({
+        id: 'vid_' + Math.random().toString(36).slice(2, 9),
+        name: file.name || `Video note (${timeStr})`,
+        type: file.type || 'video/mp4',
+        category: 'video',
+        size: file.size,
+        data: String(reader.result),
+      });
+      ACT.closeVideoModal();
+    };
+    reader.readAsDataURL(file);
+  }
+
   if (t.id === 'pf' && t.files[0]) img(t.files[0], 'img');
   if (t.id === 'df' && t.files[0]) img(t.files[0], 'doc');
   if (t.id === 'cf' && t.files[0]) {
