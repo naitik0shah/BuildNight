@@ -1,0 +1,22 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Bahi</title>
+<style>
+:root{--bg:#f3eddf;--card:#fbf8f0;--ink:#1d2433;--mute:#6b6a62;--line:#d9d0bb;--acc:#b0422a;color-scheme:light}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15181f;--card:#1e222b;--ink:#ece6d6;--mute:#9a978b;--line:#343a47;--acc:#e0805f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#15181f;--card:#1e222b;--ink:#ece6d6;--mute:#9a978b;--line:#343a47;--acc:#e0805f;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,"Noto Sans","Noto Sans Devanagari","Noto Sans Gujarati",sans-serif;padding-top:env(safe-area-inset-top,0)}
+h1,h2{font-family:Georgia,"Times New Roman",serif;margin:14px 0 6px}h1{font-size:30px}h2{font-size:21px}
+#app{max-width:900px;margin:0 auto;padding:10px 14px 96px}
+nav{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--card);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0)}
+nav button{flex:1;padding:13px 2px;border:0;background:none;color:var(--mute);font:inherit;font-weight:600;font-size:14px}nav button.on{color:var(--acc);box-shadow:inset 0 3px var(--acc)}
+@media(min-width:800px){nav{top:0;right:auto;width:160px;flex-direction:column;border:0;border-right:1px solid var(--line);padding-top:70px;padding-bottom:0}nav button{text-align:left;padding:12px 18px;font-size:16px;box-shadow:none!important}nav button.on{background:var(--bg)}#app{margin-left:180px;padding-bottom:30px}}
+.c{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
+input,textarea,select{width:100%;font:inherit;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);margin:4px 0}
+.chip,.btn{font:inherit;border-radius:99px;padding:7px 13px;border:1px solid var(--line);background:none;color:var(--ink);cursor:pointer;display:inline-block}
+.chip.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}.btn{background:var(--acc);color:#fff;border-color:var(--acc);font-weight:600;border-radius:8px;padding:11px 16px}.btn.g{background:none;color:var(--ink);border-color:var(--line)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:6px 0}.m,small{color:var(--mute);font-size:13px;margin:4px 0}
+.e{border-left:3px solid var(--acc);padding:2px 0 2px 11px;margin:14px 0}.tag{font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 6px;margin-right:4px}
+.low{color:var(--acc);font-weight:600}.sc{overflow-x:auto}table{border-collapse:collapse;width:100%}td,th{padding:7px 6px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+img.th{max-width:100%;max-height:200px;border-radius:6px;display:block;margin:6px 0}audio{width:100%;margin:6px 0}summary{cursor:pointer;font-weight:600}ul{padding-left:20px;margin:6px 0}
+</style></head><body><div id="app"></div>
+<nav id="nav" hidden><button data-t="log">Log</button><button data-t="stock">Stock</button><button data-t="bets">Bets</button><button data-t="tmr">Tomorrow</button><button data-t="biz">Business</button></nav>
+<script src="app.js"></script></body></html>

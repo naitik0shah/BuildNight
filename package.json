@@ -1,0 +1,20 @@
+{
+  "name": "bahi",
+  "version": "0.2.0",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "esbuild src/client/app.ts --bundle --outfile=public/app.js --target=es2020",
+    "start": "npm run build && tsx src/server.ts",
+    "dev": "npm run build && tsx watch src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": { "express": "^4.19.2" },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "esbuild": "^0.23.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}
