@@ -10,7 +10,8 @@
     "start": "npm run build && tsx src/server.ts",
     "dev": "npm run build && tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "express": "^4.19.2",

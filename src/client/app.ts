@@ -18,6 +18,7 @@ let imp: any = null;
 let pend = false;
 let mr: any = null;
 let es: EventSource | null = null;
+let booting = false;
 let stockFilter = '';
 let stockViewMode: 'cards' | 'table' = 'cards';
 let activeModal: any = null;
@@ -52,7 +53,8 @@ async function api(m: string, p: string, b?: any) {
   });
   const j = await r.json().catch(() => ({}));
   if (r.status === 401 && tok) {
-    logout();
+    if (booting) { tok = ''; sessionStorage.removeItem('t'); } // stale token on page load: boot() shows the sign-in itself
+    else logout();
     throw new Error('Session ended. Please sign in again.');
   }
   if (!r.ok) throw new Error(j.error || 'Request failed');
@@ -61,10 +63,13 @@ async function api(m: string, p: string, b?: any) {
 
 const fm = (n: number) => {
   const c = (A?.business?.currency || META?.currency || '₹').trim();
-  const val = Math.round(n || 0).toLocaleString('en-IN');
+  const val = Number(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 });
   return c.length > 1 ? `${c} ${val}` : `${c}${val}`;
 };
 
+const mediaUrl = (u: string) => (u.startsWith('/api/media/') ? (API_BASE || '') + u + '?token=' + encodeURIComponent(tok) : u);
+// empty box -> undefined (leave alone), "0" -> 0 (a real zero used to be thrown away)
+const numOrUndef = (v: any) => (v === '' || v == null || !Number.isFinite(Number(v)) ? undefined : Number(v));
 const fmt = (t: number) => new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
 const P = (id: string) => A?.people?.find((p: any) => p.id === id) || { name: 'Someone', role: '' };
 const inp = (id: string, ph: string, type = 'text', val = '', extraAttr = '') =>
@@ -79,7 +84,7 @@ function logout() {
   tab = 'log';
   activeModal = null;
   chosenTemplateId = '';
-  dr = { kind: 'note', when: 'now', extraRows: [] };
+  dr = { kind: 'note', when: 'now', extraRows: [], files: [] };
   syncNav(false);
   boot();
 }
@@ -87,7 +92,7 @@ function logout() {
 async function enter(t: string) {
   tok = t;
   sessionStorage.setItem('t', t);
-  await refresh();
+  await refresh(true); // first paint after sign-in must never wait for a focused sign-in box
   es?.close();
   const eventUrl = (API_BASE ? API_BASE : '') + '/api/events?token=' + t;
   es = new EventSource(eventUrl);
@@ -95,7 +100,7 @@ async function enter(t: string) {
     if (msg.data === 'reset') {
       logout();
     } else {
-      refresh();
+      refresh().catch(() => {});
     }
   };
   syncNav(true);
@@ -112,6 +117,15 @@ function syncNav(visible: boolean) {
 
 async function boot() {
   syncNav(false);
+  booting = true;
+  try {
+    await boot2();
+  } finally {
+    booting = false;
+  }
+}
+
+async function boot2() {
   try {
     META = await api('GET', 'state');
     SC = await api('GET', 'schema');
@@ -121,7 +135,7 @@ async function boot() {
       templatesCache = [];
     }
   } catch (err: any) {
-    $('#app').innerHTML = `<div class="c"><h2>Connection Error</h2><p class="m">${esc(err.message)}</p><button class="btn" onclick="location.reload()">Retry</button></div>`;
+    $('#app').innerHTML = `<div class="c"><h2>Connection Error</h2><p class="m">${esc(err.message)}</p><button class="btn" data-a="reload">Retry</button></div>`;
     return;
   }
 
@@ -140,6 +154,14 @@ async function boot() {
     renderSignIn();
   }
 }
+
+const TYPE_HINT: Record<string, string> = {
+  kirana: 'Grocery & Daily Essentials',
+  cafe: 'Cafe & Bakery',
+  restaurant: 'Restaurant & Dining',
+  barber: 'Salon & Barber Studio',
+  sweets: 'Traditional Confectionery',
+};
 
 function renderOnboarding() {
   const tmpls = templatesCache.length ? templatesCache : [
@@ -184,10 +206,10 @@ function renderOnboarding() {
         <p class="m">Only essentials needed now. Everything else can be tailored as you go.</p>
 
         <label for="sb">Business / Shop Name *</label>
-        ${inp('sb', 'e.g. Anand Kirana & General Store', 'text', chosenTemplateId === 'kirana' ? 'Anand Kirana Store' : chosenTemplateId === 'cafe' ? 'Central Cafe & Bakery' : chosenTemplateId === 'restaurant' ? 'Royal Dhaba & Restaurant' : chosenTemplateId === 'barber' ? 'Classic Grooming Studio' : chosenTemplateId === 'sweets' ? 'Radhey Mithai Bhandar' : '')}
+        ${inp('sb', 'e.g. Anand Kirana & General Store')}
 
         <label for="st">Business Type / Category</label>
-        ${inp('st', 'e.g. Retail Grocery, Specialty Cafe, Family Diner', 'text', chosenTemplateId === 'kirana' ? 'Grocery & Daily Essentials' : chosenTemplateId === 'cafe' ? 'Cafe & Bakery' : chosenTemplateId === 'restaurant' ? 'Restaurant & Dining' : chosenTemplateId === 'barber' ? 'Salon & Barber Studio' : chosenTemplateId === 'sweets' ? 'Traditional Confectionery' : '')}
+        ${inp('st', 'e.g. Retail Grocery, Specialty Cafe, Family Diner', 'text', TYPE_HINT[chosenTemplateId] || '')}
 
         <label>Currency Symbol</label>
         <div class="row" style="margin-bottom: 8px;">
@@ -264,9 +286,9 @@ function renderSignIn() {
   `;
 }
 
-async function refresh() {
+async function refresh(force = false) {
   A = await api('GET', 'all');
-  if (document.activeElement?.matches?.('input,textarea,select') && !activeModal) {
+  if (!force && document.activeElement?.matches?.('input,textarea,select') && !activeModal) {
     pend = true;
   } else {
     draw();
@@ -327,11 +349,17 @@ function draw() {
     if (e) dr[k] = e.value;
   });
 
+  // Redrawing replaces the DOM, which used to collapse every open section (e.g. the CSV import panel right after choosing a file).
+  const wasOpen = new Set($$('#app details[open] > summary').map((x: any) => x.textContent.trim()));
   const viewFunc = ({ log, stock, bets, tmr, biz } as any)[tab];
   $('#app').innerHTML = viewFunc ? viewFunc() : '<p>View not found</p>';
+  $$('#app details > summary').forEach((x: any) => { if (wasOpen.has(x.textContent.trim())) x.parentElement.open = true; });
 
   if (activeModal) {
-    renderModal();
+    // A live update from another device must not wipe what is being typed in an open dialog, or restart the camera preview.
+    const mc = $('#modalContainer');
+    const typing = mc && !mc.hidden && (activeModal.type === 'video' || mc.contains(document.activeElement) || mc.querySelector('details[open]'));
+    if (!typing) renderModal();
   } else {
     const mc = $('#modalContainer');
     if (mc) mc.hidden = true;
@@ -345,10 +373,10 @@ const renderEntryAttachments = (e: any) => {
     files.push(...e.files);
   }
   if (e.img) {
-    files.push({ id: '__legacy_img', name: 'Photo', type: 'image/jpeg', category: 'image', data: e.img, isLegacyImg: true });
+    files.push({ id: '__legacy_img', name: 'Photo', type: 'image/jpeg', category: 'image', url: e.img, isLegacyImg: true });
   }
   if (e.aud) {
-    files.push({ id: '__legacy_aud', name: 'Voice Note', type: 'audio/webm', category: 'audio', data: e.aud, isLegacyAud: true });
+    files.push({ id: '__legacy_aud', name: 'Voice Note', type: 'audio/webm', category: 'audio', url: e.aud, isLegacyAud: true });
   }
   if (files.length === 0) return '';
 
@@ -356,9 +384,10 @@ const renderEntryAttachments = (e: any) => {
 
   return `
     <div class="attachment-grid">
-      ${files.map((f: any) => {
+      ${files.map((f0: any) => {
+        const f = { ...f0, data: mediaUrl(f0.url || f0.data || '') };
         const removeBtn = canEdit
-          ? `<button class="att-del-btn" data-a="removeEntryAttachment" data-eid="${e.id}" data-fid="${f.id}" data-legacy="${f.isLegacyImg ? 'img' : f.isLegacyAud ? 'aud' : ''}" title="Remove this file">✕</button>`
+          ? `<button class="att-del-btn" data-a="removeEntryAttachment" data-eid="${esc(e.id)}" data-fid="${esc(f.id)}" data-legacy="${f.isLegacyImg ? 'img' : f.isLegacyAud ? 'aud' : ''}" title="Remove this file">✕</button>`
           : '';
 
         if (f.category === 'image') {
@@ -373,7 +402,7 @@ const renderEntryAttachments = (e: any) => {
           return `
             <div class="att-card">
               ${removeBtn}
-              <audio controls src="${esc(f.data)}"></audio>
+              <audio controls preload="none" src="${esc(f.data)}"></audio>
               <div class="att-info">🎙️ ${esc(f.name)}</div>
             </div>
           `;
@@ -381,7 +410,7 @@ const renderEntryAttachments = (e: any) => {
           return `
             <div class="att-card">
               ${removeBtn}
-              <video controls src="${esc(f.data)}"></video>
+              <video controls preload="none" src="${esc(f.data)}"></video>
               <div class="att-info">📹 ${esc(f.name)}</div>
             </div>
           `;
@@ -391,7 +420,7 @@ const renderEntryAttachments = (e: any) => {
               ${removeBtn}
               <div style="font-size: 26px; text-align: center;">📄</div>
               <div class="att-info" style="text-align: center;">
-                <a href="${esc(f.data)}" download="${esc(f.name)}" style="color: var(--ink); text-decoration: underline;">${esc(f.name)}</a>
+                <a href="${esc(f.data)}" download="${esc(f.name)}" target="_blank" rel="noopener" style="color: var(--ink); text-decoration: underline;">${esc(f.name)}</a>
               </div>
             </div>
           `;
@@ -429,11 +458,11 @@ const entry = (e: any) => {
         </small>
         <div class="row" style="margin: 0;">
           ${canModify ? `
-            <button class="chip" data-a="editEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px;">✏️ Edit</button>
-            <button class="chip" data-a="delEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px; color: var(--acc);" title="Delete note">🗑️ Delete</button>
+            <button class="chip" data-a="editEntry" data-i="${esc(e.id)}" style="font-size: 12px; padding: 3px 8px;">✏️ Edit</button>
+            <button class="chip" data-a="delEntry" data-i="${esc(e.id)}" style="font-size: 12px; padding: 3px 8px; color: var(--acc);" title="Delete note">🗑️ Delete</button>
           ` : ''}
-          ${A.me.owner && !e.v ? `<button class="chip" data-a="confirm" data-i="${e.id}">Confirm Note</button>` : ''}
-          ${e.kind === 'favour' && !e.settled && canModify ? `<button class="chip" data-a="settle" data-i="${e.id}">Mark Settled</button>` : ''}
+          ${A.me.owner && !e.v ? `<button class="chip" data-a="confirm" data-i="${esc(e.id)}">Confirm Note</button>` : ''}
+          ${e.kind === 'favour' && !e.settled && canModify ? `<button class="chip" data-a="settle" data-i="${esc(e.id)}">Mark Settled</button>` : ''}
         </div>
       </div>
     </div>
@@ -455,7 +484,7 @@ const log = () => {
           <div class="attachment-grid">
             ${files.map((f: any) => `
               <div class="att-card">
-                <button type="button" class="att-del-btn" data-a="delDraftFile" data-id="${f.id}" title="Remove this file">✕</button>
+                <button type="button" class="att-del-btn" data-a="delDraftFile" data-id="${esc(f.id)}" title="Remove this file">✕</button>
                 ${f.category === 'image' ? `
                   <img src="${esc(f.data)}" alt="${esc(f.name)}">
                   <div class="att-info">🖼️ ${esc(f.name)}</div>
@@ -558,7 +587,8 @@ function guess(kind: string, head: string[]) {
   const map: any = {};
   const n = head.map((h) => h.toLowerCase().replace(/[^a-z]/g, ''));
   for (const [k, , al] of IMP[kind]) {
-    const i = n.findIndex((h, j) => !used.has(j) && al.some((a: string) => h.includes(a)));
+    let i = n.findIndex((h, j) => !used.has(j) && al.includes(h));
+    if (i < 0) i = n.findIndex((h, j) => !used.has(j) && al.some((a: string) => h.includes(a)));
     map[k] = i;
     if (i >= 0) used.add(i);
   }
@@ -568,7 +598,7 @@ function guess(kind: string, head: string[]) {
 const stock = () => {
   const allItems = A.items || [];
   const filtered = allItems.filter((i: any) => !stockFilter || i.name.toLowerCase().includes(stockFilter.toLowerCase()));
-  const lowCount = allItems.filter((i: any) => i.low && i.qty <= i.low).length;
+  const lowCount = allItems.filter((i: any) => i.low && (i.qty ?? 0) <= i.low).length;
 
   return `
     <h2>
@@ -589,7 +619,7 @@ const stock = () => {
     ${stockViewMode === 'cards' ? `
       <div class="stock-grid">
         ${filtered.map((i: any) => {
-          const isLow = i.low && i.qty <= i.low;
+          const isLow = i.low && (i.qty ?? 0) <= i.low;
           const margin = i.sellPrice > 0 && i.costPrice != null ? Math.round(((i.sellPrice - i.costPrice) / i.sellPrice) * 100) : null;
           const extraKeys = i.extra ? Object.keys(i.extra) : [];
           return `
@@ -652,8 +682,8 @@ const stock = () => {
                   <b>${esc(i.name)}</b>
                   ${i.extra ? `<div class="m" style="font-size: 11px;">${Object.entries(i.extra).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(' · ')}</div>` : ''}
                 </td>
-                <td style="${i.low && i.qty <= i.low ? 'color: var(--acc); font-weight: 700;' : ''}">
-                  ${i.qty ?? 0} ${esc(i.unit || '')}${i.low && i.qty <= i.low ? ' (low)' : ''}
+                <td style="${i.low && (i.qty ?? 0) <= i.low ? 'color: var(--acc); font-weight: 700;' : ''}">
+                  ${i.qty ?? 0} ${esc(i.unit || '')}${i.low && (i.qty ?? 0) <= i.low ? ' (low)' : ''}
                 </td>
                 <td>${i.costPrice != null ? fm(i.costPrice) : '-'}</td>
                 <td>${i.sellPrice != null ? fm(i.sellPrice) : '-'}</td>
@@ -938,7 +968,7 @@ const tmr = () => {
     .map((e: any) => `${e.txt} (${e.kind}, ${P(e.by).name})`);
 
   const warn = [
-    ...A.items.filter((i: any) => i.low && i.qty <= i.low).map((i: any) => `${i.name} is low: ${i.qty} ${i.unit || ''} left`),
+    ...A.items.filter((i: any) => i.low && (i.qty ?? 0) <= i.low).map((i: any) => `${i.name} is low: ${i.qty} ${i.unit || ''} left`),
     ...A.entries.filter((e: any) => e.kind === 'favour' && !e.settled && now() - e.ev > 3 * D).map((e: any) => `Unsettled favour: ${e.txt}`),
     ...A.decisions.filter((d: any) => !d.out && d.rev <= now()).map((d: any) => `Bet due for review: ${d.txt}`),
     ...(A.entries.some((e: any) => now() - e.up < 2 * D) ? [] : ['Nothing logged in the last 2 days']),
@@ -1525,6 +1555,7 @@ function renderModal() {
   } else if (activeModal.type === 'whatsapp') {
     const origin = API_BASE || window.location.origin;
     const webhookUrl = `${origin}/api/whatsapp`;
+    const isOwner = !!A?.me?.owner;
     const token = A?.business?.waVerify || 'bahi_whatsapp_token';
 
     mc.innerHTML = `
@@ -1556,10 +1587,11 @@ function renderModal() {
           </div>
 
           <label style="font-weight: 600;">2. Webhook Verify Token</label>
+          ${isOwner ? `
           <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 14px;">
             <input readonly value="${esc(token)}" style="margin: 0; font-family: var(--font-mono); font-size: 12px;">
             <button class="btn sm" data-a="copyText" data-text="${esc(token)}">Copy Token</button>
-          </div>
+          </div>` : '<p class="m" style="margin-bottom: 14px;">Only the owner can see the verify token.</p>'}
 
           <h4 style="margin-top: 14px; margin-bottom: 6px;">Supported WhatsApp Commands</h4>
           <ul style="padding-left: 20px; font-size: 13px; color: var(--ink-subtle); margin-bottom: 16px;">
@@ -1732,16 +1764,8 @@ const ACT: any = {
     $$('.tmpl-card').forEach((el: any) => {
       el.classList.toggle('on', el.dataset.id === d.id);
     });
-    const nameInp = $('#sb');
     const typeInp = $('#st');
-    if (nameInp && typeInp) {
-      if (d.id === 'kirana') { nameInp.value = nameInp.value || 'Anand Kirana Store'; typeInp.value = 'Grocery & Daily Essentials'; }
-      else if (d.id === 'cafe') { nameInp.value = nameInp.value || 'Central Cafe & Bakery'; typeInp.value = 'Cafe & Bakery'; }
-      else if (d.id === 'restaurant') { nameInp.value = nameInp.value || 'Royal Dhaba & Restaurant'; typeInp.value = 'Restaurant & Dining'; }
-      else if (d.id === 'barber') { nameInp.value = nameInp.value || 'Classic Grooming Studio'; typeInp.value = 'Salon & Barber Studio'; }
-      else if (d.id === 'sweets') { nameInp.value = nameInp.value || 'Radhey Mithai Bhandar'; typeInp.value = 'Traditional Confectionery'; }
-      else { nameInp.value = ''; typeInp.value = ''; }
-    }
+    if (typeInp) typeInp.value = TYPE_HINT[d.id] || '';
   },
 
   setCurr(d: any) {
@@ -1778,22 +1802,18 @@ const ACT: any = {
     await enter(r.token);
   },
 
-  fillOwner(d: any) {
-    const ln = $('#ln');
-    if (ln) ln.value = d.name;
-    const lp = $('#lp');
-    if (lp) lp.focus();
+  reload() { location.reload(); },
+
+  rmKvRow(d: any, el: any) {
+    el?.closest('.kv-row')?.remove();
   },
 
   async resetPublic() {
-    if (confirm('Reset entire business? This will clear all data and start the fresh onboarding setup wizard.')) {
-      try {
-        await api('POST', 'reset-public');
-      } catch (e: any) {
-        console.warn('reset-public error:', e);
-      }
-      logout();
-    }
+    if (!confirm('Reset entire business? This will permanently clear ALL data and start the setup wizard again.')) return;
+    const code = META?.code ? prompt('Enter the server setup code to confirm:') : undefined;
+    if (META?.code && code == null) return;
+    await api('POST', 'reset-public', { code }); // errors (wrong code, reset disabled) are shown, not swallowed
+    logout();
   },
 
   logout,
@@ -1811,7 +1831,7 @@ const ACT: any = {
     div.innerHTML = `
       <input class="kv-k" placeholder="Attribute (e.g. Brand, Batch, Location)" style="flex: 1;">
       <input class="kv-v" placeholder="Value" style="flex: 1;">
-      <button type="button" class="chip" onclick="this.parentElement.remove()" style="padding: 4px 8px;">✕</button>
+      <button type="button" class="chip" data-a="rmKvRow" title="Remove this field" style="padding: 4px 8px;">✕</button>
     `;
     target.appendChild(div);
   },
@@ -1833,9 +1853,9 @@ const ACT: any = {
   },
 
   async saveMachEdit(d: any) {
-    const everyDays = Number($('#me_every')?.value) || undefined;
-    const maintenanceCost = Number($('#me_cost')?.value) || undefined;
-    const powerKw = Number($('#me_kw')?.value) || undefined;
+    const everyDays = numOrUndef($('#me_every')?.value);
+    const maintenanceCost = numOrUndef($('#me_cost')?.value);
+    const powerKw = numOrUndef($('#me_kw')?.value);
     const notes = $('#me_notes')?.value?.trim();
     const extra = extractKvRows('me_kv');
 
@@ -1847,9 +1867,9 @@ const ACT: any = {
   async saveItemEdit(d: any) {
     const name = $('#ie_name')?.value?.trim();
     const unit = $('#ie_unit')?.value?.trim();
-    const low = Number($('#ie_low')?.value) || undefined;
-    const costPrice = Number($('#ie_cost')?.value) || undefined;
-    const sellPrice = Number($('#ie_sell')?.value) || undefined;
+    const low = numOrUndef($('#ie_low')?.value);
+    const costPrice = numOrUndef($('#ie_cost')?.value);
+    const sellPrice = numOrUndef($('#ie_sell')?.value);
     const extra = extractKvRows('ie_kv');
 
     await api('PATCH', `items/${d.id}`, { name, unit, low, costPrice, sellPrice, extra });
@@ -2093,8 +2113,11 @@ const ACT: any = {
   async post() {
     let t = $('#t')?.value || '';
     let an = dr.an;
-    const m = t.match(/^\/(analy[sz]e|sent)\s*/i);
+    let kind = dr.kind;
+    const m = t.match(/^\/(save|analy[sz]e|sent)\s*/i);
+    const iss = t.match(/^\/issue\s*/i);
     if (m) { an = true; t = t.slice(m[0].length); }
+    else if (iss) { kind = 'issue'; t = t.slice(iss[0].length); }
     t = t.trim();
     let ev = now();
     if (dr.when === 'earlier') ev -= 3 * 36e5;
@@ -2109,14 +2132,16 @@ const ACT: any = {
 
     await api('POST', 'entries', {
       txt: t,
-      kind: dr.kind,
+      kind,
       about: $('#ab')?.value?.trim(),
       ev,
       an,
       files,
     });
     dr = { kind: 'note', when: 'now', files: [] };
-    await refresh();
+    // draw() copies live box values back into the draft, so empty the boxes too or the old text reappears
+    ['t', 'ab', 'dt'].forEach((k) => { const el = $('#' + k); if (el) el.value = ''; });
+    await refresh(true);
   },
 
   async confirm(d: any) {
@@ -2182,7 +2207,8 @@ const ACT: any = {
     await api('POST', 'import/moves', { rows });
     dr.doc = null;
     dr.rows = '';
-    await refresh();
+    const rb = $('#rows'); if (rb) rb.value = '';
+    await refresh(true);
   },
 
   async bet() {
@@ -2194,7 +2220,7 @@ const ACT: any = {
       txt: t,
       why: $('#bw')?.value?.trim(),
       exp: $('#be')?.value?.trim(),
-      expN: Number($('#bn')?.value) || undefined,
+      expN: numOrUndef($('#bn')?.value),
       rev: new Date(brVal).getTime(),
       snap,
     });
@@ -2203,7 +2229,7 @@ const ACT: any = {
 
   async rv(d: any) {
     const b = vals(document.querySelector(`[data-f="${d.i}"]`));
-    await api('PATCH', `decisions/${d.i}`, { out: b.o, q: b.q, act: Number(b.a) || undefined, w2: b.w, l: b.l });
+    await api('PATCH', `decisions/${d.i}`, { out: b.o, q: b.q, act: numOrUndef(b.a), w2: b.w, l: b.l });
     await refresh();
   },
 
@@ -2225,7 +2251,22 @@ const ACT: any = {
   },
 };
 
+function dismissModal() {
+  if (!activeModal) return;
+  if (activeModal.type === 'video') ACT.closeVideoModal();
+  else ACT.closeModal();
+}
+
+document.addEventListener('keydown', (e: any) => {
+  if (e.key === 'Escape') dismissModal();
+  if (e.key === 'Enter' && !e.shiftKey && e.target?.tagName === 'INPUT') {
+    if (e.target.id === 'ln' || e.target.id === 'lp') { e.preventDefault(); ACT.login().catch((x: any) => alert(x.message)); }
+    else if (['sb', 'st', 'sc', 'so', 'sp', 'sk'].includes(e.target.id)) { e.preventDefault(); ACT.setup().catch((x: any) => alert(x.message)); }
+  }
+});
+
 document.addEventListener('click', async (e: any) => {
+  if (e.target?.id === 'modalContainer') return dismissModal(); // click on the dim backdrop
   const b = e.target.closest('[data-a],[data-t]');
   if (!b) return;
   if (b.dataset.t) {
@@ -2234,7 +2275,7 @@ document.addEventListener('click', async (e: any) => {
     return;
   }
   try {
-    if (ACT[b.dataset.a]) await ACT[b.dataset.a](b.dataset);
+    if (ACT[b.dataset.a]) await ACT[b.dataset.a](b.dataset, b);
   } catch (x: any) {
     alert(x.message);
   }
@@ -2243,7 +2284,10 @@ document.addEventListener('click', async (e: any) => {
 document.addEventListener('input', (e: any) => {
   if (e.target.id === 'sq_search') {
     stockFilter = e.target.value;
-    draw();
+    const pos = e.target.selectionStart ?? stockFilter.length;
+    draw(); // re-renders the whole tab, so put the cursor back or typing stops after one letter
+    const box = $('#sq_search');
+    if (box) { box.focus(); box.setSelectionRange(pos, pos); }
   }
 });
 

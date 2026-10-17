@@ -23,7 +23,9 @@ const storage = new Storage();
 let db: any = { business: null };
 for (const k of [...Object.keys(F), 'moves']) db[k] ??= [];
 
-storage.init(db).then((loaded) => {
+// The server only starts listening once stored data is loaded (see bottom of file), so an early request can never
+// see an empty database and let someone re-run setup over existing data.
+const ready = storage.init(db).then((loaded) => {
   if (loaded) {
     db = loaded;
     for (const k of [...Object.keys(F), 'moves']) db[k] ??= [];
@@ -33,7 +35,7 @@ storage.init(db).then((loaded) => {
 });
 
 const save = () => {
-  storage.save(db);
+  storage.save(db).catch((err) => console.error('[Storage] save failed:', err?.message));
 };
 
 const uid = () => crypto.randomUUID();
@@ -73,7 +75,7 @@ const session = (p: any) => {
   return t;
 };
 const auth = (req: any, res: Response, next: NextFunction) => {
-  const t = (req.headers.authorization || '').slice(7) || (req.path.endsWith('/events') ? String(req.query.token || '') : '');
+  const t = (req.headers.authorization || '').slice(7) || (req.path.endsWith('/events') || req.path.startsWith('/api/media/') ? String(req.query.token || '') : '');
   const s = sess.get(t);
   if (!s || s.exp < Date.now()) return res.status(401).json({ error: 'Please sign in' });
   req.u = s;
@@ -87,14 +89,17 @@ function clean(col: string, b: any, partial = false) {
   const o: any = {};
   for (const [k, , t, opts] of (F[col] || [])) {
     let v = b?.[k];
+    // when editing, an emptied optional text box means "clear it" (it used to be silently ignored)
+    if (partial && v === '' && t === 'text' && REQ[col] !== k && k !== 'txt') { o[k] = ''; continue; }
     if (v === undefined || v === null || v === '') continue;
     if (t === 'number') {
       v = Number(v);
       if (!Number.isFinite(v)) throw new Error(`${k} must be a number`);
+      o[k] = v;
     } else if (t === 'bool') {
-      v = v === true || v === 'true';
+      o[k] = v === true || v === 'true';
     } else if (t === 'media') {
-      if (typeof v === 'string' && v.length < 25e6) {
+      if (typeof v === 'string' && v.startsWith('data:') && v.length < 25e6) {
         o[k] = v;
       }
     } else {
@@ -122,7 +127,7 @@ function clean(col: string, b: any, partial = false) {
         ? 'video'
         : 'file';
       const data = typeof f.data === 'string' ? f.data : '';
-      if (data && data.length < 25e6) {
+      if (data.startsWith('data:') && data.length < 25e6) {
         files.push({
           id: String(f.id || uid()),
           name,
@@ -275,7 +280,6 @@ app.get('/api/state', (_q, res) => {
       role: p.role || (p.isOwner ? 'Owner' : 'Staff'),
       isOwner: !!p.isOwner,
       hasPin: !!p.pinHash,
-      phone: p.phone || '',
     })),
     storage: storage.getStatus(),
     code: !!process.env.SETUP_CODE,
@@ -308,9 +312,15 @@ function doReset() {
   clients.clear();
 }
 
+// Unauthenticated wipe (for a forgotten owner PIN). Never open to the internet: it needs the server's SETUP_CODE,
+// or the request must come from the machine itself.
 app.post('/api/reset-public', (req, res) => {
-  if (process.env.SETUP_CODE && req.body?.code !== process.env.SETUP_CODE) {
-    return res.status(403).json({ error: 'Wrong setup code' });
+  const code = process.env.SETUP_CODE;
+  const local = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '') && !req.headers['x-forwarded-for'];
+  if (code) {
+    if (req.body?.code !== code) return res.status(403).json({ error: 'Wrong setup code' });
+  } else if (!local) {
+    return res.status(403).json({ error: 'Reset is disabled on this server. Set SETUP_CODE in its environment to enable it.' });
   }
   doReset();
   res.json({ ok: 1 });
@@ -367,7 +377,7 @@ app.post('/api/login', (req, res) => {
   const p = db.people.find((x: any) => {
     if (!x.pinHash) return false;
     const matchName = x.name && x.name.toLowerCase() === inputIdentifier;
-    const matchPhone = rawDigits && x.phone && x.phone.replace(/\D/g, '').endsWith(rawDigits);
+    const matchPhone = rawDigits.length >= 7 && x.phone && x.phone.replace(/\D/g, '').endsWith(rawDigits);
     return matchName || matchPhone;
   });
 
@@ -413,10 +423,7 @@ app.post('/api/whatsapp', (req: any, res) => {
 
         const senderPhone = String(m.from || '').replace(/\D/g, '');
         // Match sender to staff member or owner by phone number
-        let person = db.people.find((x: any) => x.phone && x.phone.replace(/\D/g, '') === senderPhone);
-        if (!person) {
-          person = db.people.find((x: any) => x.isOwner) || db.people[0];
-        }
+        const person = db.people.find((x: any) => x.phone && x.phone.replace(/\D/g, '') === senderPhone);
 
         let rawText = '';
         const attachments: any[] = [];
@@ -459,7 +466,7 @@ app.post('/api/whatsapp', (req: any, res) => {
 
         db.entries.push({
           id: m.id || uid(),
-          by: person ? person.id : 'whatsapp',
+          by: person ? person.id : 'whatsapp', // unknown numbers stay clearly unattributed
           txt: t || '[WhatsApp Message]',
           kind,
           an,
@@ -535,6 +542,29 @@ app.post('/api/whatsapp/config', auth, owner, (req: any, res) => {
   res.json({ ok: 1, waVerify: db.business.waVerify });
 });
 
+// ---- media is served separately so the main payload stays small (photos/videos live inline in the db) ----
+const lightEntry = ({ img, aud, files, ...e }: any) => ({
+  ...e,
+  files: (files || []).map(({ data, ...f }: any) => ({ ...f, url: `/api/media/${e.id}/${f.id}` })),
+  ...(img ? { img: `/api/media/${e.id}/__img` } : {}),
+  ...(aud ? { aud: `/api/media/${e.id}/__aud` } : {}),
+});
+
+app.get('/api/media/:eid/:fid', auth, (req: any, res) => {
+  const e = db.entries.find((x: any) => x.id === req.params.eid);
+  const raw = !e ? '' : req.params.fid === '__img' ? e.img : req.params.fid === '__aud' ? e.aud : (e.files || []).find((f: any) => f.id === req.params.fid)?.data;
+  const m = /^data:([\w.+-]+\/[\w.+-]+)(?:;[^,]*)?;base64,(.*)$/s.exec(String(raw || ''));
+  if (!m) return res.sendStatus(404);
+  const inline = /^(image|audio|video)\//.test(m[1]) && !/svg/.test(m[1]);
+  res.set({
+    'Content-Type': inline ? m[1] : 'application/octet-stream',
+    'Content-Disposition': inline ? 'inline' : 'attachment',
+    'Cache-Control': 'private, max-age=3600',
+    'Content-Security-Policy': "default-src 'none'; sandbox",
+  });
+  res.send(Buffer.from(m[2], 'base64'));
+});
+
 // ---- Authenticated App Endpoints ----
 app.get('/api/events', auth, (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
@@ -549,12 +579,12 @@ app.get('/api/all', auth, (req: any, res) => {
   if (!me) return res.status(401).json({ error: 'User no longer exists. Please sign in again.' });
   res.json({
     me: { id: me.id, name: me.name, owner: o, role: me.role },
-    business: db.business,
+    business: o ? db.business : (({ waSecret, waVerify, ...b }: any) => b)(db.business || {}),
     people: db.people.map(({ pinHash, salary, ...p }: any) => (o ? { ...p, salary } : p)),
     items: db.items,
     machines: o ? db.machines : db.machines.map(({ maintenanceCost, ...m }: any) => m),
     costs: o ? db.costs : [],
-    entries: db.entries,
+    entries: db.entries.map(lightEntry),
     decisions: db.decisions,
     signals: db.signals,
     moves: db.moves.slice(-100),
@@ -568,6 +598,7 @@ app.post('/api/moves', auth, (req: any, res) => {
   const it = db.items.find((i: any) => i.id === req.body?.itemId);
   const q = Number(req.body?.qty);
   if (!it || !Number.isFinite(q) || q === 0) return res.status(400).json({ error: 'Pick an item and a non-zero quantity' });
+  if ((it.qty || 0) + q < 0) return res.status(400).json({ error: `Only ${it.qty || 0} ${it.unit || ''} of ${it.name} in hand - cannot remove ${Math.abs(q)}`.replace('  ', ' ') });
   it.qty = (it.qty || 0) + q;
   db.moves.push({
     id: uid(),
@@ -609,6 +640,7 @@ app.post('/api/import/:kind', auth, owner, (req: any, res) => {
       const t = String(x.type || '').toLowerCase();
       if (/sell|sale|sold|out|issue/.test(t)) q = -Math.abs(q); else if (/^(rec|purch|buy|in$)/.test(t)) q = Math.abs(q);
       let it = find(n);
+      const isNew = !it;
       if (!it) { it = { id: uid(), name: n, qty: 0 }; db.items.push(it); r.created++; }
       it.qty = (it.qty || 0) + q;
       const d = Date.parse(x.date);
@@ -622,7 +654,7 @@ app.post('/api/import/:kind', auth, owner, (req: any, res) => {
         by: req.u.id,
         src: 'import',
       });
-      r.updated++;
+      if (!isNew) r.updated++;
     }
   }
   commit('items');
@@ -713,6 +745,11 @@ app.patch('/api/:col/:id', auth, known, (req: any, res) => {
 
   const o = clean(col, req.body, true);
   delete o.pin;
+  if (col === 'people' && req.u.owner && req.body?.pin) {
+    if (String(req.body.pin).length < 4) return res.status(400).json({ error: 'PIN needs 4+ characters' });
+    r.pinHash = hash(String(req.body.pin));
+    for (const [t, s] of sess) if (s.id === r.id && !s.owner) sess.delete(t); // old PIN no longer works anywhere
+  }
 
   if (o.extra !== undefined) {
     r.extra = { ...(r.extra || {}), ...o.extra };
@@ -744,6 +781,7 @@ app.delete('/api/:col/:id', auth, known, (req: any, res) => {
 
   if (row.isOwner) return res.status(400).json({ error: 'The owner cannot be removed' });
   db[col].splice(i, 1);
+  if (col === 'people') for (const [t, s] of sess) if (s.id === row.id) sess.delete(t); // removed staff are signed out at once
   commit(col);
   res.json({ ok: 1 });
 });
@@ -755,4 +793,4 @@ app.get('*', (req, res, next) => {
 
 app.use((e: any, _q: Request, res: Response, _n: NextFunction) => res.status(400).json({ error: e.message || 'Bad request' }));
 const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`Bahi running on http://0.0.0.0:${PORT}`));
+ready.then(() => app.listen(PORT, '0.0.0.0', () => console.log(`Bahi running on http://0.0.0.0:${PORT}`)));

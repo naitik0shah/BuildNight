@@ -25,6 +25,7 @@
   var imp = null;
   var pend = false;
   var es = null;
+  var booting = false;
   var stockFilter = "";
   var stockViewMode = "cards";
   var activeModal = null;
@@ -54,7 +55,10 @@
     });
     const j = await r.json().catch(() => ({}));
     if (r.status === 401 && tok) {
-      logout();
+      if (booting) {
+        tok = "";
+        sessionStorage.removeItem("t");
+      } else logout();
       throw new Error("Session ended. Please sign in again.");
     }
     if (!r.ok) throw new Error(j.error || "Request failed");
@@ -62,9 +66,11 @@
   }
   var fm = (n) => {
     const c = (A?.business?.currency || META?.currency || "\u20B9").trim();
-    const val = Math.round(n || 0).toLocaleString("en-IN");
+    const val = Number(n || 0).toLocaleString("en-IN", { maximumFractionDigits: 2 });
     return c.length > 1 ? `${c} ${val}` : `${c}${val}`;
   };
+  var mediaUrl = (u) => u.startsWith("/api/media/") ? (API_BASE || "") + u + "?token=" + encodeURIComponent(tok) : u;
+  var numOrUndef = (v) => v === "" || v == null || !Number.isFinite(Number(v)) ? void 0 : Number(v);
   var fmt = (t) => new Date(t).toLocaleString("en-IN", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
   var P = (id) => A?.people?.find((p) => p.id === id) || { name: "Someone", role: "" };
   var inp = (id, ph, type = "text", val = "", extraAttr = "") => `<input id="${id}" type="${type}" placeholder="${esc(ph)}" value="${esc(val)}" aria-label="${esc(ph)}" ${extraAttr}>`;
@@ -77,14 +83,14 @@
     tab = "log";
     activeModal = null;
     chosenTemplateId = "";
-    dr = { kind: "note", when: "now", extraRows: [] };
+    dr = { kind: "note", when: "now", extraRows: [], files: [] };
     syncNav(false);
     boot();
   }
   async function enter(t) {
     tok = t;
     sessionStorage.setItem("t", t);
-    await refresh();
+    await refresh(true);
     es?.close();
     const eventUrl = (API_BASE ? API_BASE : "") + "/api/events?token=" + t;
     es = new EventSource(eventUrl);
@@ -92,7 +98,8 @@
       if (msg.data === "reset") {
         logout();
       } else {
-        refresh();
+        refresh().catch(() => {
+        });
       }
     };
     syncNav(true);
@@ -107,6 +114,14 @@
   }
   async function boot() {
     syncNav(false);
+    booting = true;
+    try {
+      await boot2();
+    } finally {
+      booting = false;
+    }
+  }
+  async function boot2() {
     try {
       META = await api("GET", "state");
       SC = await api("GET", "schema");
@@ -116,7 +131,7 @@
         templatesCache = [];
       }
     } catch (err) {
-      $("#app").innerHTML = `<div class="c"><h2>Connection Error</h2><p class="m">${esc(err.message)}</p><button class="btn" onclick="location.reload()">Retry</button></div>`;
+      $("#app").innerHTML = `<div class="c"><h2>Connection Error</h2><p class="m">${esc(err.message)}</p><button class="btn" data-a="reload">Retry</button></div>`;
       return;
     }
     if (tok) {
@@ -133,6 +148,13 @@
       renderSignIn();
     }
   }
+  var TYPE_HINT = {
+    kirana: "Grocery & Daily Essentials",
+    cafe: "Cafe & Bakery",
+    restaurant: "Restaurant & Dining",
+    barber: "Salon & Barber Studio",
+    sweets: "Traditional Confectionery"
+  };
   function renderOnboarding() {
     const tmpls = templatesCache.length ? templatesCache : [
       { id: "kirana", name: "Kirana & Grocery", icon: "\u{1F6D2}", description: "Grains, oils, pulses, weighing scales, and deep freezers." },
@@ -175,10 +197,10 @@
         <p class="m">Only essentials needed now. Everything else can be tailored as you go.</p>
 
         <label for="sb">Business / Shop Name *</label>
-        ${inp("sb", "e.g. Anand Kirana & General Store", "text", chosenTemplateId === "kirana" ? "Anand Kirana Store" : chosenTemplateId === "cafe" ? "Central Cafe & Bakery" : chosenTemplateId === "restaurant" ? "Royal Dhaba & Restaurant" : chosenTemplateId === "barber" ? "Classic Grooming Studio" : chosenTemplateId === "sweets" ? "Radhey Mithai Bhandar" : "")}
+        ${inp("sb", "e.g. Anand Kirana & General Store")}
 
         <label for="st">Business Type / Category</label>
-        ${inp("st", "e.g. Retail Grocery, Specialty Cafe, Family Diner", "text", chosenTemplateId === "kirana" ? "Grocery & Daily Essentials" : chosenTemplateId === "cafe" ? "Cafe & Bakery" : chosenTemplateId === "restaurant" ? "Restaurant & Dining" : chosenTemplateId === "barber" ? "Salon & Barber Studio" : chosenTemplateId === "sweets" ? "Traditional Confectionery" : "")}
+        ${inp("st", "e.g. Retail Grocery, Specialty Cafe, Family Diner", "text", TYPE_HINT[chosenTemplateId] || "")}
 
         <label>Currency Symbol</label>
         <div class="row" style="margin-bottom: 8px;">
@@ -252,9 +274,9 @@
     </div>
   `;
   }
-  async function refresh() {
+  async function refresh(force = false) {
     A = await api("GET", "all");
-    if (document.activeElement?.matches?.("input,textarea,select") && !activeModal) {
+    if (!force && document.activeElement?.matches?.("input,textarea,select") && !activeModal) {
       pend = true;
     } else {
       draw();
@@ -307,10 +329,16 @@
       const e = $("#" + k);
       if (e) dr[k] = e.value;
     });
+    const wasOpen = new Set($$("#app details[open] > summary").map((x) => x.textContent.trim()));
     const viewFunc = { log, stock, bets, tmr, biz }[tab];
     $("#app").innerHTML = viewFunc ? viewFunc() : "<p>View not found</p>";
+    $$("#app details > summary").forEach((x) => {
+      if (wasOpen.has(x.textContent.trim())) x.parentElement.open = true;
+    });
     if (activeModal) {
-      renderModal();
+      const mc = $("#modalContainer");
+      const typing = mc && !mc.hidden && (activeModal.type === "video" || mc.contains(document.activeElement) || mc.querySelector("details[open]"));
+      if (!typing) renderModal();
     } else {
       const mc = $("#modalContainer");
       if (mc) mc.hidden = true;
@@ -322,17 +350,18 @@
       files.push(...e.files);
     }
     if (e.img) {
-      files.push({ id: "__legacy_img", name: "Photo", type: "image/jpeg", category: "image", data: e.img, isLegacyImg: true });
+      files.push({ id: "__legacy_img", name: "Photo", type: "image/jpeg", category: "image", url: e.img, isLegacyImg: true });
     }
     if (e.aud) {
-      files.push({ id: "__legacy_aud", name: "Voice Note", type: "audio/webm", category: "audio", data: e.aud, isLegacyAud: true });
+      files.push({ id: "__legacy_aud", name: "Voice Note", type: "audio/webm", category: "audio", url: e.aud, isLegacyAud: true });
     }
     if (files.length === 0) return "";
     const canEdit = !!(A?.me?.owner || e.by === A?.me?.id);
     return `
     <div class="attachment-grid">
-      ${files.map((f) => {
-      const removeBtn = canEdit ? `<button class="att-del-btn" data-a="removeEntryAttachment" data-eid="${e.id}" data-fid="${f.id}" data-legacy="${f.isLegacyImg ? "img" : f.isLegacyAud ? "aud" : ""}" title="Remove this file">\u2715</button>` : "";
+      ${files.map((f0) => {
+      const f = { ...f0, data: mediaUrl(f0.url || f0.data || "") };
+      const removeBtn = canEdit ? `<button class="att-del-btn" data-a="removeEntryAttachment" data-eid="${esc(e.id)}" data-fid="${esc(f.id)}" data-legacy="${f.isLegacyImg ? "img" : f.isLegacyAud ? "aud" : ""}" title="Remove this file">\u2715</button>` : "";
       if (f.category === "image") {
         return `
             <div class="att-card">
@@ -345,7 +374,7 @@
         return `
             <div class="att-card">
               ${removeBtn}
-              <audio controls src="${esc(f.data)}"></audio>
+              <audio controls preload="none" src="${esc(f.data)}"></audio>
               <div class="att-info">\u{1F399}\uFE0F ${esc(f.name)}</div>
             </div>
           `;
@@ -353,7 +382,7 @@
         return `
             <div class="att-card">
               ${removeBtn}
-              <video controls src="${esc(f.data)}"></video>
+              <video controls preload="none" src="${esc(f.data)}"></video>
               <div class="att-info">\u{1F4F9} ${esc(f.name)}</div>
             </div>
           `;
@@ -363,7 +392,7 @@
               ${removeBtn}
               <div style="font-size: 26px; text-align: center;">\u{1F4C4}</div>
               <div class="att-info" style="text-align: center;">
-                <a href="${esc(f.data)}" download="${esc(f.name)}" style="color: var(--ink); text-decoration: underline;">${esc(f.name)}</a>
+                <a href="${esc(f.data)}" download="${esc(f.name)}" target="_blank" rel="noopener" style="color: var(--ink); text-decoration: underline;">${esc(f.name)}</a>
               </div>
             </div>
           `;
@@ -399,11 +428,11 @@
         </small>
         <div class="row" style="margin: 0;">
           ${canModify ? `
-            <button class="chip" data-a="editEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px;">\u270F\uFE0F Edit</button>
-            <button class="chip" data-a="delEntry" data-i="${e.id}" style="font-size: 12px; padding: 3px 8px; color: var(--acc);" title="Delete note">\u{1F5D1}\uFE0F Delete</button>
+            <button class="chip" data-a="editEntry" data-i="${esc(e.id)}" style="font-size: 12px; padding: 3px 8px;">\u270F\uFE0F Edit</button>
+            <button class="chip" data-a="delEntry" data-i="${esc(e.id)}" style="font-size: 12px; padding: 3px 8px; color: var(--acc);" title="Delete note">\u{1F5D1}\uFE0F Delete</button>
           ` : ""}
-          ${A.me.owner && !e.v ? `<button class="chip" data-a="confirm" data-i="${e.id}">Confirm Note</button>` : ""}
-          ${e.kind === "favour" && !e.settled && canModify ? `<button class="chip" data-a="settle" data-i="${e.id}">Mark Settled</button>` : ""}
+          ${A.me.owner && !e.v ? `<button class="chip" data-a="confirm" data-i="${esc(e.id)}">Confirm Note</button>` : ""}
+          ${e.kind === "favour" && !e.settled && canModify ? `<button class="chip" data-a="settle" data-i="${esc(e.id)}">Mark Settled</button>` : ""}
         </div>
       </div>
     </div>
@@ -423,7 +452,7 @@
           <div class="attachment-grid">
             ${files.map((f) => `
               <div class="att-card">
-                <button type="button" class="att-del-btn" data-a="delDraftFile" data-id="${f.id}" title="Remove this file">\u2715</button>
+                <button type="button" class="att-del-btn" data-a="delDraftFile" data-id="${esc(f.id)}" title="Remove this file">\u2715</button>
                 ${f.category === "image" ? `
                   <img src="${esc(f.data)}" alt="${esc(f.name)}">
                   <div class="att-info">\u{1F5BC}\uFE0F ${esc(f.name)}</div>
@@ -531,7 +560,8 @@
     const map = {};
     const n = head.map((h) => h.toLowerCase().replace(/[^a-z]/g, ""));
     for (const [k, , al] of IMP[kind]) {
-      const i = n.findIndex((h, j) => !used.has(j) && al.some((a) => h.includes(a)));
+      let i = n.findIndex((h, j) => !used.has(j) && al.includes(h));
+      if (i < 0) i = n.findIndex((h, j) => !used.has(j) && al.some((a) => h.includes(a)));
       map[k] = i;
       if (i >= 0) used.add(i);
     }
@@ -540,7 +570,7 @@
   var stock = () => {
     const allItems = A.items || [];
     const filtered = allItems.filter((i) => !stockFilter || i.name.toLowerCase().includes(stockFilter.toLowerCase()));
-    const lowCount = allItems.filter((i) => i.low && i.qty <= i.low).length;
+    const lowCount = allItems.filter((i) => i.low && (i.qty ?? 0) <= i.low).length;
     return `
     <h2>
       <span>Stock & Inventory</span>
@@ -560,7 +590,7 @@
     ${stockViewMode === "cards" ? `
       <div class="stock-grid">
         ${filtered.map((i) => {
-      const isLow = i.low && i.qty <= i.low;
+      const isLow = i.low && (i.qty ?? 0) <= i.low;
       const margin = i.sellPrice > 0 && i.costPrice != null ? Math.round((i.sellPrice - i.costPrice) / i.sellPrice * 100) : null;
       const extraKeys = i.extra ? Object.keys(i.extra) : [];
       return `
@@ -623,8 +653,8 @@
                   <b>${esc(i.name)}</b>
                   ${i.extra ? `<div class="m" style="font-size: 11px;">${Object.entries(i.extra).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join(" \xB7 ")}</div>` : ""}
                 </td>
-                <td style="${i.low && i.qty <= i.low ? "color: var(--acc); font-weight: 700;" : ""}">
-                  ${i.qty ?? 0} ${esc(i.unit || "")}${i.low && i.qty <= i.low ? " (low)" : ""}
+                <td style="${i.low && (i.qty ?? 0) <= i.low ? "color: var(--acc); font-weight: 700;" : ""}">
+                  ${i.qty ?? 0} ${esc(i.unit || "")}${i.low && (i.qty ?? 0) <= i.low ? " (low)" : ""}
                 </td>
                 <td>${i.costPrice != null ? fm(i.costPrice) : "-"}</td>
                 <td>${i.sellPrice != null ? fm(i.sellPrice) : "-"}</td>
@@ -893,7 +923,7 @@
     const sig = A.signals.filter((x) => x.on && (new Date(x.on).getTime() - now()) / D >= -1 && (new Date(x.on).getTime() - now()) / D <= 14).map((x) => `${x.src}: ${x.t} on ${x.on} (${x.c} confidence)`);
     const hs = A.entries.filter((e) => (e.kind === "hunch" || e.kind === "rumour") && now() - e.ev < 7 * D).map((e) => `${e.txt} (${e.kind}, ${P(e.by).name})`);
     const warn = [
-      ...A.items.filter((i) => i.low && i.qty <= i.low).map((i) => `${i.name} is low: ${i.qty} ${i.unit || ""} left`),
+      ...A.items.filter((i) => i.low && (i.qty ?? 0) <= i.low).map((i) => `${i.name} is low: ${i.qty} ${i.unit || ""} left`),
       ...A.entries.filter((e) => e.kind === "favour" && !e.settled && now() - e.ev > 3 * D).map((e) => `Unsettled favour: ${e.txt}`),
       ...A.decisions.filter((d) => !d.out && d.rev <= now()).map((d) => `Bet due for review: ${d.txt}`),
       ...A.entries.some((e) => now() - e.up < 2 * D) ? [] : ["Nothing logged in the last 2 days"]
@@ -1477,6 +1507,7 @@
     } else if (activeModal.type === "whatsapp") {
       const origin = API_BASE || window.location.origin;
       const webhookUrl = `${origin}/api/whatsapp`;
+      const isOwner = !!A?.me?.owner;
       const token = A?.business?.waVerify || "bahi_whatsapp_token";
       mc.innerHTML = `
       <div class="modal-box" style="max-width: 620px;">
@@ -1507,10 +1538,11 @@
           </div>
 
           <label style="font-weight: 600;">2. Webhook Verify Token</label>
+          ${isOwner ? `
           <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 14px;">
             <input readonly value="${esc(token)}" style="margin: 0; font-family: var(--font-mono); font-size: 12px;">
             <button class="btn sm" data-a="copyText" data-text="${esc(token)}">Copy Token</button>
-          </div>
+          </div>` : '<p class="m" style="margin-bottom: 14px;">Only the owner can see the verify token.</p>'}
 
           <h4 style="margin-top: 14px; margin-bottom: 6px;">Supported WhatsApp Commands</h4>
           <ul style="padding-left: 20px; font-size: 13px; color: var(--ink-subtle); margin-bottom: 16px;">
@@ -1682,29 +1714,8 @@
       $$(".tmpl-card").forEach((el) => {
         el.classList.toggle("on", el.dataset.id === d.id);
       });
-      const nameInp = $("#sb");
       const typeInp = $("#st");
-      if (nameInp && typeInp) {
-        if (d.id === "kirana") {
-          nameInp.value = nameInp.value || "Anand Kirana Store";
-          typeInp.value = "Grocery & Daily Essentials";
-        } else if (d.id === "cafe") {
-          nameInp.value = nameInp.value || "Central Cafe & Bakery";
-          typeInp.value = "Cafe & Bakery";
-        } else if (d.id === "restaurant") {
-          nameInp.value = nameInp.value || "Royal Dhaba & Restaurant";
-          typeInp.value = "Restaurant & Dining";
-        } else if (d.id === "barber") {
-          nameInp.value = nameInp.value || "Classic Grooming Studio";
-          typeInp.value = "Salon & Barber Studio";
-        } else if (d.id === "sweets") {
-          nameInp.value = nameInp.value || "Radhey Mithai Bhandar";
-          typeInp.value = "Traditional Confectionery";
-        } else {
-          nameInp.value = "";
-          typeInp.value = "";
-        }
-      }
+      if (typeInp) typeInp.value = TYPE_HINT[d.id] || "";
     },
     setCurr(d) {
       dr.currency = d.c;
@@ -1738,21 +1749,18 @@
       const r = await api("POST", "login", { name, pin });
       await enter(r.token);
     },
-    fillOwner(d) {
-      const ln = $("#ln");
-      if (ln) ln.value = d.name;
-      const lp = $("#lp");
-      if (lp) lp.focus();
+    reload() {
+      location.reload();
+    },
+    rmKvRow(d, el) {
+      el?.closest(".kv-row")?.remove();
     },
     async resetPublic() {
-      if (confirm("Reset entire business? This will clear all data and start the fresh onboarding setup wizard.")) {
-        try {
-          await api("POST", "reset-public");
-        } catch (e) {
-          console.warn("reset-public error:", e);
-        }
-        logout();
-      }
+      if (!confirm("Reset entire business? This will permanently clear ALL data and start the setup wizard again.")) return;
+      const code = META?.code ? prompt("Enter the server setup code to confirm:") : void 0;
+      if (META?.code && code == null) return;
+      await api("POST", "reset-public", { code });
+      logout();
     },
     logout,
     kind: (d) => {
@@ -1779,7 +1787,7 @@
       div.innerHTML = `
       <input class="kv-k" placeholder="Attribute (e.g. Brand, Batch, Location)" style="flex: 1;">
       <input class="kv-v" placeholder="Value" style="flex: 1;">
-      <button type="button" class="chip" onclick="this.parentElement.remove()" style="padding: 4px 8px;">\u2715</button>
+      <button type="button" class="chip" data-a="rmKvRow" title="Remove this field" style="padding: 4px 8px;">\u2715</button>
     `;
       target.appendChild(div);
     },
@@ -1797,9 +1805,9 @@
       if (mc) mc.hidden = true;
     },
     async saveMachEdit(d) {
-      const everyDays = Number($("#me_every")?.value) || void 0;
-      const maintenanceCost = Number($("#me_cost")?.value) || void 0;
-      const powerKw = Number($("#me_kw")?.value) || void 0;
+      const everyDays = numOrUndef($("#me_every")?.value);
+      const maintenanceCost = numOrUndef($("#me_cost")?.value);
+      const powerKw = numOrUndef($("#me_kw")?.value);
       const notes = $("#me_notes")?.value?.trim();
       const extra = extractKvRows("me_kv");
       await api("PATCH", `machines/${d.id}`, { everyDays, maintenanceCost, powerKw, notes, extra });
@@ -1809,9 +1817,9 @@
     async saveItemEdit(d) {
       const name = $("#ie_name")?.value?.trim();
       const unit = $("#ie_unit")?.value?.trim();
-      const low = Number($("#ie_low")?.value) || void 0;
-      const costPrice = Number($("#ie_cost")?.value) || void 0;
-      const sellPrice = Number($("#ie_sell")?.value) || void 0;
+      const low = numOrUndef($("#ie_low")?.value);
+      const costPrice = numOrUndef($("#ie_cost")?.value);
+      const sellPrice = numOrUndef($("#ie_sell")?.value);
       const extra = extractKvRows("ie_kv");
       await api("PATCH", `items/${d.id}`, { name, unit, low, costPrice, sellPrice, extra });
       await refresh();
@@ -2042,10 +2050,15 @@
     async post() {
       let t = $("#t")?.value || "";
       let an = dr.an;
-      const m = t.match(/^\/(analy[sz]e|sent)\s*/i);
+      let kind = dr.kind;
+      const m = t.match(/^\/(save|analy[sz]e|sent)\s*/i);
+      const iss = t.match(/^\/issue\s*/i);
       if (m) {
         an = true;
         t = t.slice(m[0].length);
+      } else if (iss) {
+        kind = "issue";
+        t = t.slice(iss[0].length);
       }
       t = t.trim();
       let ev = now();
@@ -2059,14 +2072,18 @@
       }
       await api("POST", "entries", {
         txt: t,
-        kind: dr.kind,
+        kind,
         about: $("#ab")?.value?.trim(),
         ev,
         an,
         files
       });
       dr = { kind: "note", when: "now", files: [] };
-      await refresh();
+      ["t", "ab", "dt"].forEach((k) => {
+        const el = $("#" + k);
+        if (el) el.value = "";
+      });
+      await refresh(true);
     },
     async confirm(d) {
       await api("POST", `entries/${d.i}/confirm`);
@@ -2127,7 +2144,9 @@
       await api("POST", "import/moves", { rows });
       dr.doc = null;
       dr.rows = "";
-      await refresh();
+      const rb = $("#rows");
+      if (rb) rb.value = "";
+      await refresh(true);
     },
     async bet() {
       const t = $("#bt")?.value?.trim();
@@ -2138,7 +2157,7 @@
         txt: t,
         why: $("#bw")?.value?.trim(),
         exp: $("#be")?.value?.trim(),
-        expN: Number($("#bn")?.value) || void 0,
+        expN: numOrUndef($("#bn")?.value),
         rev: new Date(brVal).getTime(),
         snap
       });
@@ -2146,7 +2165,7 @@
     },
     async rv(d) {
       const b = vals(document.querySelector(`[data-f="${d.i}"]`));
-      await api("PATCH", `decisions/${d.i}`, { out: b.o, q: b.q, act: Number(b.a) || void 0, w2: b.w, l: b.l });
+      await api("PATCH", `decisions/${d.i}`, { out: b.o, q: b.q, act: numOrUndef(b.a), w2: b.w, l: b.l });
       await refresh();
     },
     async applyTmpl(d) {
@@ -2165,7 +2184,25 @@
       }
     }
   };
+  function dismissModal() {
+    if (!activeModal) return;
+    if (activeModal.type === "video") ACT.closeVideoModal();
+    else ACT.closeModal();
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") dismissModal();
+    if (e.key === "Enter" && !e.shiftKey && e.target?.tagName === "INPUT") {
+      if (e.target.id === "ln" || e.target.id === "lp") {
+        e.preventDefault();
+        ACT.login().catch((x) => alert(x.message));
+      } else if (["sb", "st", "sc", "so", "sp", "sk"].includes(e.target.id)) {
+        e.preventDefault();
+        ACT.setup().catch((x) => alert(x.message));
+      }
+    }
+  });
   document.addEventListener("click", async (e) => {
+    if (e.target?.id === "modalContainer") return dismissModal();
     const b = e.target.closest("[data-a],[data-t]");
     if (!b) return;
     if (b.dataset.t) {
@@ -2174,7 +2211,7 @@
       return;
     }
     try {
-      if (ACT[b.dataset.a]) await ACT[b.dataset.a](b.dataset);
+      if (ACT[b.dataset.a]) await ACT[b.dataset.a](b.dataset, b);
     } catch (x) {
       alert(x.message);
     }
@@ -2182,7 +2219,13 @@
   document.addEventListener("input", (e) => {
     if (e.target.id === "sq_search") {
       stockFilter = e.target.value;
+      const pos = e.target.selectionStart ?? stockFilter.length;
       draw();
+      const box = $("#sq_search");
+      if (box) {
+        box.focus();
+        box.setSelectionRange(pos, pos);
+      }
     }
   });
   document.addEventListener("change", (e) => {
